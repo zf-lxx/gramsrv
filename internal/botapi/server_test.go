@@ -1099,6 +1099,85 @@ func TestBotAPIPollRegistryRejectsConcurrentPoller(t *testing.T) {
 	}
 }
 
+func TestSendMediaGroupMultipartBuildsAlbum(t *testing.T) {
+	bots := &fakeBotAPIBots{profile: domain.BotProfile{BotUserID: 1001, TokenSecret: "secret"}}
+	gateway := &fakeBotAPIGateway{
+		self: domain.User{ID: 1001, FirstName: "Echo", Username: "echo_bot", Bot: true},
+	}
+	h := (&handler{bots: bots, gateway: gateway}).routes()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("chat_id", "2001")
+	_ = writer.WriteField("media", `[{"type":"photo","media":"attach://p1","caption":"one"},{"type":"photo","media":"attach://p2","caption":"two"}]`)
+	for _, field := range []string{"p1", "p2"} {
+		part, err := writer.CreateFormFile(field, field+".png")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := part.Write([]byte("png-" + field)); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	token := domain.FormatBotToken(bots.profile.BotUserID, bots.profile.TokenSecret)
+	req := httptest.NewRequest(http.MethodPost, "/bot"+token+"/sendMediaGroup", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if len(gateway.mediaGroupSends) != 1 {
+		t.Fatalf("media group sends = %d", len(gateway.mediaGroupSends))
+	}
+	sent := gateway.mediaGroupSends[0]
+	if sent.ChatID != 2001 || len(sent.Items) != 2 {
+		t.Fatalf("input = %#v", sent)
+	}
+	for i, wantCaption := range []string{"one", "two"} {
+		if sent.Items[i].Kind != "photo" || sent.Items[i].Caption != wantCaption {
+			t.Fatalf("item %d = %#v", i, sent.Items[i])
+		}
+		if string(sent.Items[i].File.Bytes) != "png-p"+string(rune('1'+i)) {
+			t.Fatalf("item %d bytes = %q", i, string(sent.Items[i].File.Bytes))
+		}
+	}
+	var resp struct {
+		OK     bool             `json:"ok"`
+		Result []map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK || len(resp.Result) != 2 {
+		t.Fatalf("response = %s", rec.Body.String())
+	}
+}
+
+func TestSendMediaGroupRejectsSingleItem(t *testing.T) {
+	bots := &fakeBotAPIBots{profile: domain.BotProfile{BotUserID: 1001, TokenSecret: "secret"}}
+	gateway := &fakeBotAPIGateway{
+		self: domain.User{ID: 1001, FirstName: "Echo", Username: "echo_bot", Bot: true},
+	}
+	h := (&handler{bots: bots, gateway: gateway}).routes()
+	token := domain.FormatBotToken(bots.profile.BotUserID, bots.profile.TokenSecret)
+	body := strings.NewReader(`{"chat_id":2001,"media":[{"type":"photo","media":"AgACAgIAAxkBAAI"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/bot"+token+"/sendMediaGroup", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if len(gateway.mediaGroupSends) != 0 {
+		t.Fatalf("gateway should not be called for a single-item album")
+	}
+}
+
 func TestSendDocumentMultipartParsesFileAndCaption(t *testing.T) {
 	bots := &fakeBotAPIBots{profile: domain.BotProfile{BotUserID: 1001, TokenSecret: "secret"}}
 	gateway := &fakeBotAPIGateway{
@@ -1537,6 +1616,8 @@ type fakeBotAPIGateway struct {
 	sendMediaCaption         string
 	sendMediaEntities        []domain.MessageEntity
 	sendMediaMessage         domain.Message
+	mediaGroupSends          []domain.BotAPIMediaGroupInput
+	mediaGroupMessages       []domain.Message
 	editCalled               bool
 	editText                 string
 	editEntities             []domain.MessageEntity
@@ -1788,6 +1869,18 @@ func (f *fakeBotAPIGateway) BotAPIGetFile(_ context.Context, _ int64, locationKe
 	out := chunk
 	out.Bytes = append([]byte(nil), chunk.Bytes[offset:end]...)
 	return out, true, nil
+}
+
+func (f *fakeBotAPIGateway) BotAPISendMediaGroup(_ context.Context, input domain.BotAPIMediaGroupInput) ([]domain.Message, error) {
+	f.mediaGroupSends = append(f.mediaGroupSends, input)
+	if f.mediaGroupMessages != nil {
+		return f.mediaGroupMessages, nil
+	}
+	out := make([]domain.Message, 0, len(input.Items))
+	for i := range input.Items {
+		out = append(out, domain.Message{ID: 900 + i, Date: 1_700_000_000})
+	}
+	return out, nil
 }
 
 func (f *fakeBotAPIGateway) BotAPISendEphemeral(_ context.Context, input domain.BotAPIEphemeralSendInput) (domain.EphemeralMessage, error) {

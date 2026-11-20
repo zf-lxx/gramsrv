@@ -920,6 +920,8 @@ func botAPIMediaErr(err error) error {
 	if strings.Contains(strings.ToUpper(err.Error()), "FILE_ID_INVALID") {
 		return err
 	}
+	// A media failure is reported to the bot as MEDIA_INVALID; the underlying cause is
+	// not part of the Bot API contract and must not leak into the response.
 	return errors.New("MEDIA_INVALID")
 }
 
@@ -1196,4 +1198,100 @@ func (r *Router) BotAPIGetFile(ctx context.Context, botID int64, locationKey str
 		Offset:      offset,
 		Limit:       limit,
 	})
+}
+
+// BotAPISendMediaGroup sends one Bot API album. Every item is resolved through
+// the same media path a single sendPhoto/sendVideo uses, then all of them are
+// committed with one shared grouped_id so clients render a single album instead
+// of N independent messages.
+//
+// Bot API albums carry 2..10 items; this enforces the lower bound so an empty or
+// single-item group cannot silently send. Members are addressed by chat_id only,
+// so the batch targets one peer. Channels and private chats both work; the reply
+// target rides on the first item because clients draw one reply header per group.
+func (r *Router) BotAPISendMediaGroup(ctx context.Context, input domain.BotAPIMediaGroupInput) ([]domain.Message, error) {
+	if r == nil || r.deps.Files == nil || input.BotUserID == 0 {
+		return nil, errors.New("BOT_INVALID")
+	}
+	if len(input.Items) < 2 {
+		return nil, errors.New("MEDIA_INVALID")
+	}
+	peer, ok := botAPIPeerFromChatID(input.ChatID)
+	if !ok {
+		return nil, errors.New("CHAT_ID_INVALID")
+	}
+	if peer.Type == domain.PeerTypeChannel && r.deps.Channels == nil {
+		return nil, errors.New("CHAT_ID_INVALID")
+	}
+	if peer.Type == domain.PeerTypeUser && r.deps.Messages == nil {
+		return nil, errors.New("BOT_INVALID")
+	}
+
+	// Resolve and commit one item at a time under a single grouped_id. Media
+	// resolution failures abort before that item is persisted; already-sent
+	// members keep the group id, so a partial album still renders as an album.
+	groupedID := randomNonZeroInt64()
+	date := int(time.Now().Unix())
+	messages := make([]domain.Message, 0, len(input.Items))
+	for i, item := range input.Items {
+		if utf8.RuneCountInString(item.Caption) > domain.MaxMessageTextLength {
+			return nil, errors.New("MESSAGE_TOO_LONG")
+		}
+		caption := item.Caption
+		entities := r.augmentBotAPIAutoEntities(caption, item.Entities)
+		file := item.File
+		media, err := r.botAPIMedia(ctx, input.BotUserID, item.Kind, file.LocationKey, file.RemoteURL, file.FileName, file.MimeType, file.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		var reply *domain.MessageReply
+		if i == 0 && input.ReplyToMessageID > 0 {
+			reply = &domain.MessageReply{Peer: peer, MessageID: input.ReplyToMessageID}
+		}
+		silent := input.Silent || item.Silent
+		if peer.Type == domain.PeerTypeChannel {
+			res, err := r.deps.Channels.SendMessage(ctx, input.BotUserID, domain.SendChannelMessageRequest{
+				UserID:              input.BotUserID,
+				ChannelID:           peer.ID,
+				RandomID:            randomNonZeroInt64(),
+				Message:             caption,
+				Entities:            append([]domain.MessageEntity(nil), entities...),
+				Media:               media,
+				MentionUserIDs:      r.mentionUserIDsFromDomain(ctx, input.BotUserID, caption, entities),
+				SkipRecipientLookup: true,
+				PostAuthor:          r.channelPostAuthorName(ctx, input.BotUserID),
+				Silent:              silent,
+				ReplyTo:             reply,
+				GroupedID:           groupedID,
+				Date:                date,
+			})
+			if err != nil {
+				return nil, botAPIChannelSendErr(err)
+			}
+			if !res.Duplicate {
+				r.enqueueChannelMessageFanout(ctx, input.BotUserID, res, nil)
+				r.pushChannelDiscussionUpdate(ctx, input.BotUserID, res.Discussion)
+				r.maybeEnqueueWebPageResolve(input.BotUserID, peer, res.Message.ID, res.Message.Media)
+			}
+			messages = append(messages, botAPIMessageFromChannel(input.BotUserID, res.Message))
+			continue
+		}
+		res, err := r.deps.Messages.SendPrivateText(ctx, input.BotUserID, domain.SendPrivateTextRequest{
+			SenderUserID:    input.BotUserID,
+			RecipientUserID: peer.ID,
+			RandomID:        randomNonZeroInt64(),
+			Message:         caption,
+			Entities:        append([]domain.MessageEntity(nil), entities...),
+			Media:           media,
+			Silent:          silent,
+			ReplyTo:         reply,
+			Date:            date,
+			GroupedID:       groupedID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, res.SenderMessage)
+	}
+	return messages, nil
 }

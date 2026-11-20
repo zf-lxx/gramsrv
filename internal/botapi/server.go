@@ -66,6 +66,9 @@ type GatewayService interface {
 	BotAPISendMessage(ctx context.Context, botID, chatID int64, text string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, disableWebPagePreview, silent bool, replyToMessageID int) (domain.Message, error)
 	BotAPISendRichMessage(ctx context.Context, botID, chatID int64, rich domain.BotAPIRichMessageInput, replyMarkup *domain.MessageReplyMarkup, silent, noForwards bool, replyToMessageID int, effectID int64) (domain.Message, error)
 	BotAPISendMedia(ctx context.Context, botID, chatID int64, kind, locationKey, remoteURL, fileName, mimeType string, fileBytes []byte, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error)
+	// BotAPISendMediaGroup sends one album: every message shares a single
+	// grouped_id and the batch commits or rolls back as a unit.
+	BotAPISendMediaGroup(ctx context.Context, input domain.BotAPIMediaGroupInput) ([]domain.Message, error)
 	BotAPIEditMessageText(ctx context.Context, botID, chatID int64, messageID int, text string, entities []domain.MessageEntity, setReplyMarkup bool, replyMarkup *domain.MessageReplyMarkup, disableWebPagePreview bool) (domain.Message, error)
 	BotAPIEditRichMessage(ctx context.Context, botID, chatID int64, messageID int, rich domain.BotAPIRichMessageInput, setReplyMarkup bool, replyMarkup *domain.MessageReplyMarkup) (domain.Message, error)
 	BotAPIEditInlineMessageText(ctx context.Context, botID int64, inlineMessageID domain.BotInlineMessageID, text string, entities []domain.MessageEntity, setReplyMarkup bool, replyMarkup *domain.MessageReplyMarkup, disableWebPagePreview bool) (bool, error)
@@ -85,6 +88,12 @@ type MessageActionGatewayService interface {
 	BotAPISendChatAction(ctx context.Context, botID, chatID int64, action domain.BotAPIChatAction, topMessageID int) (bool, error)
 	BotAPIEditMessageCaption(ctx context.Context, botID, chatID int64, messageID int, caption string, entities []domain.MessageEntity, setReplyMarkup bool, replyMarkup *domain.MessageReplyMarkup) (domain.Message, error)
 	BotAPIEditMessageReplyMarkup(ctx context.Context, botID, chatID int64, messageID int, replyMarkup *domain.MessageReplyMarkup) (domain.Message, error)
+}
+
+// MediaGroupGatewayService sends Bot API albums. It carries the whole batch so
+// every message can share one grouped_id and commit atomically.
+type MediaGroupGatewayService interface {
+	BotAPISendMediaGroup(ctx context.Context, input domain.BotAPIMediaGroupInput) ([]domain.Message, error)
 }
 
 type EphemeralGatewayService interface {
@@ -220,7 +229,9 @@ func (p *botAPIPollRegistry) release(botID int64) {
 }
 
 const (
-	maxBotAPIUploadBytes          = 25 << 20
+	maxBotAPIUploadBytes = 25 << 20
+	// maxBotAPIMediaGroupItems matches the official Bot API album limit.
+	maxBotAPIMediaGroupItems      = 10
 	maxBotAPIRequestOverheadBytes = 1 << 20
 	maxBotAPIRequestBytes         = maxBotAPIUploadBytes + maxBotAPIRequestOverheadBytes
 	botAPILongPollFallback        = 5 * time.Second
@@ -269,6 +280,8 @@ func (h *handler) handle(w http.ResponseWriter, r *http.Request) {
 		h.sendMessage(w, r, botID)
 	case "sendrichmessage":
 		h.sendRichMessage(w, r, botID)
+	case "sendmediagroup":
+		h.sendMediaGroup(w, r, botID)
 	case "sendphoto":
 		h.sendMedia(w, r, botID, "photo")
 	case "sendanimation":
@@ -982,6 +995,85 @@ func (h *handler) sendRichMessage(w http.ResponseWriter, r *http.Request, botID 
 		users = append(users, self)
 	}
 	writeAPIOK(w, apiMessage(msg, users))
+}
+
+func (h *handler) sendMediaGroup(w http.ResponseWriter, r *http.Request, botID int64) {
+	gateway, ok := h.gateway.(MediaGroupGatewayService)
+	if !ok {
+		writeAPIError(w, http.StatusNotImplemented, "METHOD_NOT_FOUND")
+		return
+	}
+	values, files, err := requestValuesWithFiles(r)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, apiErrorDescription(err))
+		return
+	}
+	chatID, err := strconv.ParseInt(strings.TrimSpace(values["chat_id"]), 10, 64)
+	if err != nil || chatID == 0 {
+		writeAPIError(w, http.StatusBadRequest, "CHAT_ID_INVALID")
+		return
+	}
+	items, ok := botAPIMediaGroupItems(values["media"], files)
+	if !ok {
+		writeAPIError(w, http.StatusBadRequest, "MEDIA_INVALID")
+		return
+	}
+	messages, err := gateway.BotAPISendMediaGroup(r.Context(), domain.BotAPIMediaGroupInput{
+		BotUserID:        botID,
+		ChatID:           chatID,
+		Items:            items,
+		Silent:           apiBool(values["disable_notification"]),
+		ReplyToMessageID: apiInt(values["reply_to_message_id"], 0),
+	})
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, apiErrorDescription(err))
+		return
+	}
+	users := []domain.User(nil)
+	if self, err := h.gateway.BotAPISelf(r.Context(), botID); err == nil && self.ID != 0 {
+		users = append(users, self)
+	}
+	out := make([]map[string]any, 0, len(messages))
+	for _, msg := range messages {
+		out = append(out, apiMessage(msg, users))
+	}
+	writeAPIOK(w, out)
+}
+
+// botAPIMediaGroupItems decodes the sendMediaGroup "media" array. Each entry
+// carries its own type, file reference and caption; the official API accepts 2
+// to 10 items and rejects anything else.
+func botAPIMediaGroupItems(raw string, files map[string]uploadedFile) ([]domain.BotAPIMediaGroupItem, bool) {
+	var entries []struct {
+		Type      string          `json:"type"`
+		Media     string          `json:"media"`
+		Caption   string          `json:"caption"`
+		ParseMode string          `json:"parse_mode"`
+		Entities  json.RawMessage `json:"caption_entities"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, false
+	}
+	if len(entries) < 2 || len(entries) > maxBotAPIMediaGroupItems {
+		return nil, false
+	}
+	items := make([]domain.BotAPIMediaGroupItem, 0, len(entries))
+	for _, entry := range entries {
+		kind := strings.ToLower(strings.TrimSpace(entry.Type))
+		if kind != "photo" && kind != "video" && kind != "audio" && kind != "document" {
+			return nil, false
+		}
+		file, ok := botAPIFileInput(entry.Media, files, kind, nil)
+		if !ok {
+			return nil, false
+		}
+		caption, entities, err := botAPIFormattedTextRaw(entry.Caption, entry.ParseMode, string(entry.Entities), domain.MaxEphemeralCaptionLength, false)
+		if err != nil {
+			return nil, false
+		}
+		items = append(items, domain.BotAPIMediaGroupItem{Kind: kind, File: file, Caption: caption, Entities: entities})
+	}
+	return items, true
 }
 
 func (h *handler) sendMedia(w http.ResponseWriter, r *http.Request, botID int64, kind string) {

@@ -222,6 +222,29 @@ type BotAPIFileInput struct {
 	Emoji       string
 }
 
+// BotAPIMediaGroupItem is one entry of a Bot API sendMediaGroup album. Kind is
+// the Bot API media type ("photo", "video", "audio", "document"); the file is
+// resolved exactly like the single-media send path.
+type BotAPIMediaGroupItem struct {
+	Kind      string
+	File      BotAPIFileInput
+	Caption   string
+	Entities  []MessageEntity
+	Silent    bool
+	ShowAbove bool
+}
+
+// BotAPIMediaGroupInput is one whole album. Every item shares one grouped_id so
+// clients render them as a single album, and the batch either fully commits or
+// fully rolls back.
+type BotAPIMediaGroupInput struct {
+	BotUserID        int64
+	ChatID           int64
+	Items            []BotAPIMediaGroupItem
+	Silent           bool
+	ReplyToMessageID int
+}
+
 type BotAPIEphemeralSendInput struct {
 	BotUserID          int64
 	ChatID             int64
