@@ -1,0 +1,15 @@
+# Local override: run locally built images instead of the registry pins.
+#
+# The base compose.yaml pins postgres/redis by sha256 digest, and digest pulls
+# go straight to registry-1.docker.io, which this network cannot reach. Images
+# are fetched once through the registry mirror and re-tagged by tag name here.
+# server/admin point at binaries built from this checkout, because the
+# published :main image predates the fix in localStarGiftWithdrawalOption.
+services:
+  postgres:
+    image: postgres:17-alpine
+  redis:
+    image: redis:7-alpine
+  server:
+    image: gramsrv/server:local
+    build: !reset null

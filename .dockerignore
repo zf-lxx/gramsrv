@@ -6,6 +6,11 @@
 .vscode
 .idea
 
+# Runtime state and generated assets are never part of the build context: the
+# Dockerfile only copies cmd/, deploy/ and internal/.
+data
+docs
+
 # Local builds, caches, and runtime state.
 bin
 dist
