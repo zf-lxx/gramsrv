@@ -211,10 +211,13 @@ func TestCreatePhotoFromBytesStoresDownloadableMessageSizes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePhotoFromBytes: %v", err)
 	}
-	if photo.ID == 0 || photo.AccessHash == 0 || photo.DCID != 2 || len(photo.Sizes) != 2 {
+	if photo.ID == 0 || photo.AccessHash == 0 || photo.DCID != 2 || len(photo.Sizes) < 2 {
 		t.Fatalf("photo = %+v, want stored photo with message sizes", photo)
 	}
-	blob, ok, err := media.GetFileBlob(ctx, fmt.Sprintf("photo:%d:x", photo.ID))
+	// A 16x9 source is smaller than every ladder step, so the renditions carry the
+	// original pixels; the largest advertised type must still resolve to real bytes.
+	largest := photo.Sizes[len(photo.Sizes)-1]
+	blob, ok, err := media.GetFileBlob(ctx, fmt.Sprintf("photo:%d:%s", photo.ID, largest.Type))
 	if err != nil || !ok {
 		t.Fatalf("photo blob ok=%v err=%v", ok, err)
 	}
@@ -224,6 +227,116 @@ func TestCreatePhotoFromBytesStoresDownloadableMessageSizes(t *testing.T) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Fatalf("photo blob bytes mismatch")
+	}
+}
+
+func TestCreatePhotoFromBytesStoresDistinctThumbnailRendition(t *testing.T) {
+	ctx := context.Background()
+	media := newFakeMediaStore()
+	blobs, err := NewLocalFS(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalFS: %v", err)
+	}
+	svc := NewService(media, blobs, 2)
+	data := testJPEG(t, 1600, 1200)
+
+	photo, err := svc.CreatePhotoFromBytes(ctx, data)
+	if err != nil {
+		t.Fatalf("CreatePhotoFromBytes: %v", err)
+	}
+	var thumb, full *domain.PhotoSize
+	for i := range photo.Sizes {
+		switch photo.Sizes[i].Type {
+		case "m":
+			thumb = &photo.Sizes[i]
+		}
+		if full == nil || photo.Sizes[i].W > full.W {
+			full = &photo.Sizes[i]
+		}
+	}
+	if thumb == nil || full == nil {
+		t.Fatalf("sizes = %+v, want m and a full-size entry", photo.Sizes)
+	}
+	// The 320px thumb must actually be 320px; advertising the full-resolution
+	// dimensions under the 'm' type leaves clients spinning on a download that
+	// never matches the promised size.
+	if thumb.W != 320 || thumb.H != 240 {
+		t.Fatalf("thumb = %dx%d, want 320x240", thumb.W, thumb.H)
+	}
+	if full.W != 1600 || full.H != 1200 {
+		t.Fatalf("full = %dx%d, want 1600x1200", full.W, full.H)
+	}
+	thumbBlob, ok, err := media.GetFileBlob(ctx, fmt.Sprintf("photo:%d:m", photo.ID))
+	if err != nil || !ok {
+		t.Fatalf("thumb blob ok=%v err=%v", ok, err)
+	}
+	fullBlob, ok, err := media.GetFileBlob(ctx, fmt.Sprintf("photo:%d:%s", photo.ID, full.Type))
+	if err != nil || !ok {
+		t.Fatalf("full blob ok=%v err=%v", ok, err)
+	}
+	if thumbBlob.ObjectKey == fullBlob.ObjectKey {
+		t.Fatal("thumb and full share one blob; the thumb was never rendered")
+	}
+	thumbBytes, err := blobs.Get(ctx, thumbBlob.ObjectKey)
+	if err != nil {
+		t.Fatalf("read thumb blob: %v", err)
+	}
+	if gotW, gotH := imageDimensions(thumbBytes, 0, 0); gotW != 320 || gotH != 240 {
+		t.Fatalf("thumb bytes = %dx%d, want 320x240", gotW, gotH)
+	}
+	if thumbBlob.Size != int64(len(thumbBytes)) || thumbBlob.Size == fullBlob.Size {
+		t.Fatalf("thumb size = %d, full size = %d", thumbBlob.Size, fullBlob.Size)
+	}
+}
+
+// TestCreatePhotoFromBytesUsesMediumPlusOriginalSizes locks the message-photo
+// size ladder to exactly [m, x]. Emitting a leading "s" (100px) entry made the
+// Android client settle on it and ask upload.getFile for "s" only, so the
+// full-screen view never requested the real rendition and sat on a download
+// spinner. Emitting "y"/"w" as the largest entry had the same effect. Upstream
+// owpengram-server uses m=320 thumb plus x=original, which renders correctly.
+func TestCreatePhotoFromBytesUsesMediumPlusOriginalSizes(t *testing.T) {
+	ctx := context.Background()
+	media := newFakeMediaStore()
+	blobs, err := NewLocalFS(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalFS: %v", err)
+	}
+	svc := NewService(media, blobs, 2)
+
+	for _, tc := range []struct {
+		name                   string
+		w, h                   int
+		wantThumbW, wantThumbH int
+	}{
+		{"large", 1600, 1200, 320, 240},
+		{"portrait", 900, 1600, 180, 320},
+		{"small", 240, 180, 240, 180},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			photo, err := svc.CreatePhotoFromBytes(ctx, testJPEG(t, tc.w, tc.h))
+			if err != nil {
+				t.Fatalf("CreatePhotoFromBytes: %v", err)
+			}
+			if len(photo.Sizes) != 2 {
+				t.Fatalf("sizes = %+v, want exactly [m, x]", photo.Sizes)
+			}
+			thumb, full := photo.Sizes[0], photo.Sizes[1]
+			if thumb.Type != "m" || full.Type != "x" {
+				t.Fatalf("size types = %q,%q, want m,x", thumb.Type, full.Type)
+			}
+			if thumb.W != tc.wantThumbW || thumb.H != tc.wantThumbH {
+				t.Fatalf("thumb = %dx%d, want %dx%d", thumb.W, thumb.H, tc.wantThumbW, tc.wantThumbH)
+			}
+			if full.W != tc.w || full.H != tc.h {
+				t.Fatalf("full = %dx%d, want %dx%d (original)", full.W, full.H, tc.w, tc.h)
+			}
+			for _, size := range photo.Sizes {
+				if size.Type == "s" || size.Type == "y" || size.Type == "w" {
+					t.Fatalf("ladder must not advertise %q, got %+v", size.Type, photo.Sizes)
+				}
+			}
+		})
 	}
 }
 
@@ -793,7 +906,9 @@ func TestEnsureAvatarPhotoCreatesSeparateAvatarForMessagePhoto(t *testing.T) {
 	if !reflect.DeepEqual(storedSource, source) {
 		t.Fatalf("source photo row = %+v, want unchanged %+v", storedSource, source)
 	}
-	for _, sizeType := range []string{"s", "a", "c"} {
+	// Source photos now carry the message ladder (which includes an 's'), so only
+	// the avatar-only renditions must stay absent.
+	for _, sizeType := range []string{"a", "c"} {
 		if _, found, _ := media.GetFileBlob(ctx, fmt.Sprintf("photo:%d:%s", source.ID, sizeType)); found {
 			t.Fatalf("source photo gained blob %s", sizeType)
 		}

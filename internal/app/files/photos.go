@@ -862,28 +862,65 @@ func avatarSourceDecodable(data []byte) bool {
 }
 
 func (s *Service) putPhotoStaticSizes(ctx context.Context, photoID int64, data []byte, specs []photoSizeSpec) ([]domain.PhotoSize, error) {
-	objectKey, err := s.blobs.Put(ctx, data)
-	if err != nil {
-		return nil, err
+	// Every advertised size must be backed by its own rendition. Reusing the
+	// original bytes for each spec (as this used to) left the 'm' thumb as a
+	// full-resolution copy, so clients rendered a photo message as a permanent
+	// download spinner: the location existed but never matched the advertised
+	// dimensions.
+	src, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil || src.Bounds().Dx() <= 0 || src.Bounds().Dy() <= 0 {
+		return nil, domain.ErrPhotoInvalid
 	}
-	mimeType := imageMimeType(data)
 	sizes := make([]domain.PhotoSize, 0, len(specs))
 	for _, spec := range specs {
+		rendition, err := photoRendition(data, src, format, spec)
+		if err != nil {
+			return nil, err
+		}
+		objectKey, err := s.blobs.Put(ctx, rendition)
+		if err != nil {
+			return nil, err
+		}
 		blob := domain.FileBlob{
 			LocationKey: fmt.Sprintf("photo:%d:%s", photoID, spec.Type),
 			Backend:     domain.MediaBackend(s.blobs.Name()),
 			ObjectKey:   objectKey,
-			Size:        int64(len(data)),
-			MimeType:    mimeType,
+			Size:        int64(len(rendition)),
+			MimeType:    imageMimeType(rendition),
 		}
 		if err := s.media.PutFileBlob(ctx, blob); err != nil {
 			return nil, err
 		}
 		s.blobCache.put(blob.LocationKey, blob)
-		sizes = append(sizes, domain.PhotoSize{Kind: domain.PhotoSizeKindDefault, Type: spec.Type, W: spec.W, H: spec.H, Size: len(data)})
+		s.prewarmSmallBlob(objectKey, rendition)
+		sizes = append(sizes, domain.PhotoSize{Kind: domain.PhotoSizeKindDefault, Type: spec.Type, W: spec.W, H: spec.H, Size: len(rendition)})
 	}
-	s.prewarmSmallBlob(objectKey, data)
 	return sizes, nil
+}
+
+// photoRendition scales a message photo to one advertised size. Unlike the
+// avatar path it preserves the aspect ratio instead of centre-cropping, so a
+// thumbnail still looks like the picture the sender uploaded.
+func photoRendition(original []byte, src image.Image, format string, spec photoSizeSpec) ([]byte, error) {
+	bounds := src.Bounds()
+	if bounds.Dx() == spec.W && bounds.Dy() == spec.H {
+		return append([]byte(nil), original...), nil
+	}
+	if spec.W <= 0 || spec.H <= 0 {
+		return nil, domain.ErrPhotoInvalid
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, spec.W, spec.H))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, bounds, xdraw.Src, nil)
+
+	var buf bytes.Buffer
+	if format == "jpeg" {
+		if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 90}); err != nil {
+			return nil, err
+		}
+	} else if err := png.Encode(&buf, dst); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // putAvatarStaticSizes stores independently rendered avatar sizes. DrKLO uses the
@@ -1076,10 +1113,33 @@ func photoSizeSpecsForAvatar(data []byte) []photoSizeSpec {
 	}
 }
 
-// photoSizeSpecsForMessage generates the download sizes for a photo message ('m' thumbnail + 'x'/'y' large image).
+// photoSizeSpecsForMessage generates the download sizes for a photo message.
+//
+// Emit exactly two entries: "m" holding a 320px thumbnail and "x" holding the
+// original pixels. This matches upstream owpengram-server and is the shape the
+// DrKLO client is tuned for (messagePhoto.sizes == [m, x]). Two habits break the
+// Android full-screen view, and both were observed against a real device:
+//
+//   - starting the ladder at "s" (100px) makes the client settle on that entry:
+//     it asks upload.getFile for "s", receives the 466-byte 100x75 block, and the
+//     full-screen view spins forever on a picture that never arrives.
+//   - advertising "y"/"w" as the largest rendition is not what the client walks
+//     to for message photos; it keeps waiting on a size it never requests.
+//
+// RPC still tolerates a client asking for a type that is not stored here:
+// upload.getFile resolves missing photo sizes through fallbackPhotoLocationKey.
 func photoSizeSpecsForMessage(data []byte) []photoSizeSpec {
 	w, h := imageDimensions(data, 1280, 1280)
 	thumbW, thumbH := scaleDown(w, h, 320)
+	if thumbW == w && thumbH == h {
+		// A source at or below 320px cannot carry a distinct thumbnail. Reuse the
+		// pixels under both types: clients index sizes by type name and clip a lone
+		// entry under the wrong bucket, which shows up as a spinner.
+		return []photoSizeSpec{
+			{Type: "m", W: thumbW, H: thumbH},
+			{Type: "x", W: thumbW, H: thumbH},
+		}
+	}
 	return []photoSizeSpec{
 		{Type: "m", W: thumbW, H: thumbH},
 		{Type: "x", W: w, H: h},

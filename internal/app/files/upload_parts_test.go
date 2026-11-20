@@ -198,7 +198,7 @@ func TestCreatePhotoFromUploadReceiptReplaysAfterPartCleanup(t *testing.T) {
 	media := newFakeMediaStore()
 	svc, _ := newUploadPartTestService(t, media, domain.UploadPartQuota{})
 	file := domain.UploadedFileRef{OwnerUserID: 10, FileID: 201, Parts: 1, Name: "photo.jpg"}
-	if _, err := svc.SaveFilePart(ctx, file.OwnerUserID, file.FileID, 0, []byte("image-bytes")); err != nil {
+	if _, err := svc.SaveFilePart(ctx, file.OwnerUserID, file.FileID, 0, testJPEG(t, 64, 48)); err != nil {
 		t.Fatalf("SaveFilePart: %v", err)
 	}
 	first, err := svc.CreatePhotoFromUpload(ctx, file)

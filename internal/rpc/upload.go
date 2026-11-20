@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/iamxvbaba/td/tg"
@@ -134,6 +135,11 @@ func (r *Router) onUploadGetFile(ctx context.Context, req *tg.UploadGetFileReque
 	if !ok {
 		return nil, locationInvalidErr()
 	}
+	// A client may ask for a size type the photo never advertised (DrKLO picks
+	// from its own ladder, so a photo stored with only m/x makes it request y).
+	// Serving a real rendition beats LOCATION_INVALID, which leaves the image on
+	// a permanent spinner.
+	key = r.fallbackPhotoLocationKey(ctx, key)
 	chunk, found, err := r.deps.Files.GetFile(ctx, domain.FileDownloadRequest{
 		LocationKey: key,
 		Offset:      req.Offset,
@@ -243,6 +249,70 @@ func (r *Router) onUploadGetGroupCallStream(ctx context.Context, loc *tg.InputGr
 // onUploadGetFileHashes returns an empty hash list: this stage does no CDN/part
 // integrity verification, and the client trusts the data directly based on the empty
 // list.
+// photoSizeFallbacks orders the Telegram photo size ladder from smallest to
+// largest so a missing type can fall forward to the nearest real rendition.
+var photoSizeFallbacks = []string{"s", "m", "x", "y", "w"}
+
+// fallbackPhotoLocationKey maps a photo size type that was never stored onto the
+// nearest rendition that exists. Clients derive the requested type from their own
+// ladder (DrKLO: FileLoader.SIZE_s/m/x/y/w) rather than from the sizes we
+// advertised, so a photo stored with a short ladder would otherwise make every
+// full-size view fail with LOCATION_INVALID.
+func (r *Router) fallbackPhotoLocationKey(ctx context.Context, key string) string {
+	if r == nil || r.deps.Files == nil {
+		return key
+	}
+	id, sizeType, ok := splitPhotoLocationKey(key)
+	if !ok || sizeType == "" {
+		return key
+	}
+	if _, found, err := r.deps.Files.GetFile(ctx, domain.FileDownloadRequest{LocationKey: key, Limit: 1}); err == nil && found {
+		return key
+	}
+	// Prefer the same-or-larger rendition (clients ask for a type expecting a
+	// usable image), then fall back to smaller ones.
+	index := photoSizeIndex(sizeType)
+	for step := index; step < len(photoSizeFallbacks); step++ {
+		candidate := fmt.Sprintf("photo:%d:%s", id, photoSizeFallbacks[step])
+		if _, found, err := r.deps.Files.GetFile(ctx, domain.FileDownloadRequest{LocationKey: candidate, Limit: 1}); err == nil && found {
+			return candidate
+		}
+	}
+	for step := index - 1; step >= 0; step-- {
+		candidate := fmt.Sprintf("photo:%d:%s", id, photoSizeFallbacks[step])
+		if _, found, err := r.deps.Files.GetFile(ctx, domain.FileDownloadRequest{LocationKey: candidate, Limit: 1}); err == nil && found {
+			return candidate
+		}
+	}
+	return key
+}
+
+func splitPhotoLocationKey(key string) (int64, string, bool) {
+	if !strings.HasPrefix(key, "photo:") {
+		return 0, "", false
+	}
+	rest := strings.TrimPrefix(key, "photo:")
+	idText, sizeType, ok := strings.Cut(rest, ":")
+	if !ok {
+		return 0, "", false
+	}
+	id, err := strconv.ParseInt(idText, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, "", false
+	}
+	return id, sizeType, true
+}
+
+func photoSizeIndex(sizeType string) int {
+	for i, candidate := range photoSizeFallbacks {
+		if candidate == sizeType {
+			return i
+		}
+	}
+	// Unknown types start from the smallest slot so the loop still walks the ladder.
+	return 0
+}
+
 func (r *Router) onUploadGetFileHashes(ctx context.Context, req *tg.UploadGetFileHashesRequest) ([]tg.FileHash, error) {
 	return []tg.FileHash{}, nil
 }

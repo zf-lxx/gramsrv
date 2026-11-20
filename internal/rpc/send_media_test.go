@@ -47,6 +47,7 @@ type fakeFiles struct {
 	getFileChunk       domain.FileChunk
 	getFileFound       bool
 	getFileCalls       int
+	getFileMissingFor  map[string]bool
 	ensureAvatarErr    error
 }
 
@@ -73,6 +74,11 @@ func (f *fakeFiles) SaveBigFilePart(context.Context, int64, int64, int, int, []b
 func (f *fakeFiles) GetFile(_ context.Context, req domain.FileDownloadRequest) (domain.FileChunk, bool, error) {
 	f.getFileCalls++
 	f.getFileRequest = req
+	// getFileMissingFor lets a test model a store that has only some renditions of
+	// a photo, which is what the upload.getFile size fallback has to cope with.
+	if f.getFileMissingFor != nil && f.getFileMissingFor[req.LocationKey] {
+		return domain.FileChunk{}, false, nil
+	}
 	return f.getFileChunk, f.getFileFound, nil
 }
 func (f *fakeFiles) CreateEncryptedFileFromUpload(context.Context, domain.UploadedFileRef, int) (domain.EncryptedFileRef, error) {
