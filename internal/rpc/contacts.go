@@ -985,9 +985,6 @@ func (r *Router) recordAcceptedContactTargetUpdates(ctx context.Context, userID,
 	if err := r.recordPeerSettingsForUser(ctx, zeroAuthKeyID, targetUserID, peer, settings, zeroAuthKeyID, 0); err != nil {
 		return internalErr()
 	}
-	if err := r.recordContactsResetForUser(ctx, zeroAuthKeyID, targetUserID, zeroAuthKeyID, 0); err != nil {
-		return internalErr()
-	}
 	peerUser := domain.User{ID: userID}
 	if r.deps.Users != nil {
 		u, found, err := r.deps.Users.ByID(ctx, targetUserID, userID)
@@ -999,7 +996,6 @@ func (r *Router) recordAcceptedContactTargetUpdates(ctx context.Context, userID,
 		}
 	}
 	updates := r.contactPeerSettingsUpdates(ctx, targetUserID, peerUser, settings, true)
-	updates.Updates = append(updates.Updates, &tg.UpdateContactsReset{})
 	r.pushUserUpdatesIfNoReliableDispatch(ctx, targetUserID, updates)
 	return nil
 }
