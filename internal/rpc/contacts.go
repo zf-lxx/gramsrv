@@ -512,12 +512,10 @@ func (r *Router) onContactsImportContacts(ctx context.Context, input []tg.InputP
 			}
 		}
 	}
-	if err := r.recordContactsReset(ctx, userID); err != nil {
-		r.log.Warn("contacts.importContacts record contacts reset failed", append(r.contextLogFields(ctx), zap.Error(err), zap.Int("contacts", len(items)))...)
-		return nil, internalErr()
-	}
+	// updateContactsReset makes Android call forceImportContacts(). Emitting it
+	// from the import that update itself triggered retries forever, and the
+	// dialog list stays on Updating.
 	r.invalidateRPCProjectionForViewer(userID)
-	r.pushContactsReset(ctx, userID)
 	return out, nil
 }
 
