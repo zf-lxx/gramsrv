@@ -8,9 +8,9 @@
 
 | 项 | 值 |
 |---|---|
-| Bot API 根地址 | `http://189.1.229.227:59997` |
-| 调用方法 | `http://189.1.229.227:59997/bot<TOKEN>/<METHOD>` |
-| 下载文件 | `http://189.1.229.227:59997/file/bot<TOKEN>/<file_path>` |
+| Bot API 根地址 | `https://bot.zhufu.de5.net` |
+| 调用方法 | `https://bot.zhufu.de5.net/bot<TOKEN>/<METHOD>` |
+| 下载文件 | `https://bot.zhufu.de5.net/file/bot<TOKEN>/<file_path>` |
 | 监听 | `TELESRV_BOT_API_ADDR`，空值表示关闭网关 |
 | BotFather 附带展示的地址 | `TELESRV_BOT_API_PUBLIC_URL`，空值则不展示 |
 
@@ -19,7 +19,7 @@
 确认网关和 token：
 
 ```bash
-curl -sS "http://189.1.229.227:59997/bot<TOKEN>/getMe"
+curl -sS "https://bot.zhufu.de5.net/bot<TOKEN>/getMe"
 ```
 
 返回 `"ok": true` 且 `is_bot` 为 true 即可。`0.0.0.0` 只能作监听地址，不能当客户端要请求的主机。
@@ -39,10 +39,10 @@ curl -sS "http://189.1.229.227:59997/bot<TOKEN>/getMe"
 
 | 库 | 配置 |
 |---|---|
-| python-telegram-bot | `base_url` 为 `http://189.1.229.227:59997/bot`，`base_file_url` 为 `http://189.1.229.227:59997/file/bot` |
-| aiogram 3 | `TelegramAPIServer.from_base("http://189.1.229.227:59997")` |
-| grammY | `apiRoot: "http://189.1.229.227:59997/bot"` |
-| QwenPaw | 频道里的 `base_url` 填 `http://189.1.229.227:59997`，`http_proxy` 留空 |
+| python-telegram-bot | `base_url` 为 `https://bot.zhufu.de5.net/bot`，`base_file_url` 为 `https://bot.zhufu.de5.net/file/bot` |
+| aiogram 3 | `TelegramAPIServer.from_base("https://bot.zhufu.de5.net")` |
+| grammY | `apiRoot: "https://bot.zhufu.de5.net/bot"` |
+| QwenPaw | 频道里的 `base_url` 填 `https://bot.zhufu.de5.net`，`http_proxy` 留空 |
 
 QwenPaw 会自己在根地址后面拼 `/bot` 和 `/file/bot`。`base_url` 留空时它去请求 `api.telegram.org`，本服 token 会被拒绝。它实际用到、并且本服已经实现的接口有 `getUpdates`、`sendMessage`、`editMessageText`、`sendChatAction`、`deleteMessage`、`sendPhoto`、`sendDocument` 和 `getFile`。文本可以用 `parse_mode` 的 `HTML`、`Markdown` 或 `MarkdownV2`。
 
@@ -52,8 +52,8 @@ from telegram.ext import Application
 app = (
     Application.builder()
     .token("<TOKEN>")
-    .base_url("http://189.1.229.227:59997/bot")
-    .base_file_url("http://189.1.229.227:59997/file/bot")
+    .base_url("https://bot.zhufu.de5.net/bot")
+    .base_file_url("https://bot.zhufu.de5.net/file/bot")
     .build()
 )
 ```
