@@ -1799,12 +1799,12 @@ func (f *fakeBotAPIGateway) BotAPISendRichMessage(_ context.Context, botID, chat
 	return f.sendMessage, nil
 }
 
-func (f *fakeBotAPIGateway) BotAPISendMedia(_ context.Context, botID, chatID int64, kind, locationKey, remoteURL, fileName, mimeType string, fileBytes []byte, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error) {
+func (f *fakeBotAPIGateway) BotAPISendMedia(_ context.Context, botID, chatID int64, kind string, file domain.BotAPIFileInput, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error) {
 	f.sendMediaCalled = true
 	f.sendMediaKind = kind
 	f.sendMediaChatID = chatID
-	f.sendMediaFileName = fileName
-	f.sendMediaBytes = append([]byte(nil), fileBytes...)
+	f.sendMediaFileName = file.FileName
+	f.sendMediaBytes = append([]byte(nil), file.Bytes...)
 	f.sendMediaCaption = caption
 	f.sendMediaEntities = append([]domain.MessageEntity(nil), entities...)
 	return f.sendMediaMessage, nil

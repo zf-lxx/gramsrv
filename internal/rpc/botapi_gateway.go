@@ -385,9 +385,10 @@ func (r *Router) BotAPISendRichMessage(ctx context.Context, botID, chatID int64,
 	return res.SenderMessage, nil
 }
 
-// BotAPISendMedia sends a photo/document message through the same files service
-// and private/channel message state machines used by MTProto sendMedia.
-func (r *Router) BotAPISendMedia(ctx context.Context, botID, chatID int64, kind, locationKey, remoteURL, fileName, mimeType string, fileBytes []byte, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error) {
+// BotAPISendMedia sends a photo, document, audio, video, voice, animation, or
+// sticker through the same files service and private/channel message state
+// machines used by MTProto sendMedia.
+func (r *Router) BotAPISendMedia(ctx context.Context, botID, chatID int64, kind string, file domain.BotAPIFileInput, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error) {
 	if r == nil || r.deps.Files == nil || botID == 0 {
 		return domain.Message{}, errors.New("BOT_INVALID")
 	}
@@ -406,7 +407,7 @@ func (r *Router) BotAPISendMedia(ctx context.Context, botID, chatID int64, kind,
 	}
 	// The caption is treated the same way as the body text: commands like /buy, @mentions and bare domains all need a server-side entity to render in blue.
 	entities = r.augmentBotAPIAutoEntities(caption, entities)
-	media, err := r.botAPIMedia(ctx, botID, kind, locationKey, remoteURL, fileName, mimeType, fileBytes)
+	media, err := r.botAPIKindMedia(ctx, botID, kind, file)
 	if err != nil {
 		return domain.Message{}, err
 	}
@@ -818,6 +819,22 @@ func botAPIChannelSendErr(err error) error {
 		return errors.New("REPLY_MESSAGE_ID_INVALID")
 	default:
 		return channelInvalidErr(err)
+	}
+}
+
+// botAPIKindMedia resolves one Bot API attachment. Photos stay on the photo
+// pipeline. Everything else, including audio, is a document plus the attributes
+// that tell clients to render a music, video, or voice bubble. botAPIMedia only
+// accepts photo and document, so routing audio through it returns MEDIA_INVALID
+// before the bytes are stored.
+func (r *Router) botAPIKindMedia(ctx context.Context, botID int64, kind string, file domain.BotAPIFileInput) (*domain.MessageMedia, error) {
+	switch kind {
+	case "photo", "document":
+		return r.botAPIMedia(ctx, botID, kind, file.LocationKey, file.RemoteURL, file.FileName, file.MimeType, file.Bytes)
+	case "animation", "audio", "sticker", "video", "video_note", "voice":
+		return r.botAPIDocumentMedia(ctx, botID, kind, file)
+	default:
+		return nil, errors.New("MEDIA_INVALID")
 	}
 }
 
@@ -1240,7 +1257,7 @@ func (r *Router) BotAPISendMediaGroup(ctx context.Context, input domain.BotAPIMe
 		caption := item.Caption
 		entities := r.augmentBotAPIAutoEntities(caption, item.Entities)
 		file := item.File
-		media, err := r.botAPIMedia(ctx, input.BotUserID, item.Kind, file.LocationKey, file.RemoteURL, file.FileName, file.MimeType, file.Bytes)
+		media, err := r.botAPIKindMedia(ctx, input.BotUserID, item.Kind, file)
 		if err != nil {
 			return nil, err
 		}

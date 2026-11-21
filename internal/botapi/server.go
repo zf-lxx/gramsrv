@@ -65,7 +65,7 @@ type GatewayService interface {
 	BotAPIUpdates(ctx context.Context, botID int64, offset int64) ([]domain.UpdateEvent, error)
 	BotAPISendMessage(ctx context.Context, botID, chatID int64, text string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, disableWebPagePreview, silent bool, replyToMessageID int) (domain.Message, error)
 	BotAPISendRichMessage(ctx context.Context, botID, chatID int64, rich domain.BotAPIRichMessageInput, replyMarkup *domain.MessageReplyMarkup, silent, noForwards bool, replyToMessageID int, effectID int64) (domain.Message, error)
-	BotAPISendMedia(ctx context.Context, botID, chatID int64, kind, locationKey, remoteURL, fileName, mimeType string, fileBytes []byte, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error)
+	BotAPISendMedia(ctx context.Context, botID, chatID int64, kind string, file domain.BotAPIFileInput, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error)
 	// BotAPISendMediaGroup sends one album: every message shares a single
 	// grouped_id and the batch commits or rolls back as a unit.
 	BotAPISendMediaGroup(ctx context.Context, input domain.BotAPIMediaGroupInput) ([]domain.Message, error)
@@ -1153,8 +1153,7 @@ func (h *handler) sendMedia(w http.ResponseWriter, r *http.Request, botID int64,
 		h.writeEphemeralMessage(w, r, botID, message)
 		return
 	}
-	locationKey, remoteURL, fileName, mimeType, fileBytes := file.LocationKey, file.RemoteURL, file.FileName, file.MimeType, file.Bytes
-	msg, err := h.gateway.BotAPISendMedia(r.Context(), botID, chatID, kind, locationKey, remoteURL, fileName, mimeType, fileBytes, caption, entities, markup, apiBool(values["disable_notification"]), apiInt(values["reply_to_message_id"], 0))
+	msg, err := h.gateway.BotAPISendMedia(r.Context(), botID, chatID, kind, file, caption, entities, markup, apiBool(values["disable_notification"]), apiInt(values["reply_to_message_id"], 0))
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, apiErrorDescription(err))
 		return
