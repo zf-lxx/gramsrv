@@ -155,6 +155,7 @@ flowchart LR
 Telegram Desktop 是第一兼容目标，Android、iOS 和 Web 路径也在持续覆盖。
 部分高级功能仍以兼容性验证或实验为主，但对应实现都开放在本仓库中。与官方 Telegram
 有意不同的行为列在 [docs/telegram-differences.md](docs/telegram-differences.md)（英文）。
+本服机器人的创建方式和 Bot API 地址见 [docs/bot-api.zh-CN.md](docs/bot-api.zh-CN.md)。
 
 ## 客户端
 

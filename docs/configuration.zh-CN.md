@@ -123,6 +123,8 @@ live expanded buffer 释放后会归还进程内存，但不会返还该 frame �
 
 ### 3.1 Bot API webhook 故障排查
 
+在这台部署上创建机器人、领取 token，以及把 QwenPaw 或其他 Bot API 客户端指过来，见 [bot-api.zh-CN.md](./bot-api.zh-CN.md)。下面只排 webhook。
+
 先区分三个地址，禁止把 webhook 接收域名当成 Bot API 地址：
 
 | 名称 | 配置/来源 | 方向与用途 |

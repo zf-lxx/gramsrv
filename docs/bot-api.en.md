@@ -6,6 +6,7 @@ the parameters it accepts, the extensions it adds, and the official methods it
 deliberately does not support.
 
 Russian version of this document: [bot-api.ru.md](./bot-api.ru.md).
+Chinese usage guide for this deployment: [bot-api.zh-CN.md](./bot-api.zh-CN.md).
 
 ## How to use this document
 
