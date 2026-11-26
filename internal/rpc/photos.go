@@ -667,20 +667,26 @@ func (r *Router) pushBotPhotoUpdateToOwner(ctx context.Context, ownerUserID int6
 	}
 	updates := selfPhotoUpdates(bot, int(r.clock.Now().Unix()), projected)
 	r.pushUserUpdates(ctx, ownerUserID, updates)
-	// Official current-layer servers emit updateUser (updateUserPhoto is no
-	// longer in the schema) with modern userProfilePhoto#82d1f706. Android
-	// synthesizes that constructor's photo_big as local_id='c', so a new
-	// photo_id does not look like a location change. Stock ChatEditActivity
-	// mutates the cached bot user in place with unique ImageUpdater local_ids,
-	// then posts UPDATE_MASK_AVATAR in the photos.uploadProfilePhoto callback.
-	// ProfileGalleryView.initIfEmpty refetches photos.getUserPhotos only when
-	// that local_id changes; an immediate current-session echo replaces those
-	// unique ids with 'c' before the callback, and a back-stacked
-	// ProfileActivity keeps the old full-bleed header. Official timing, and
-	// the self-avatar path, deliver the echo after the callback. Keep
-	// stripped_thumb on the echoed user so a slow RPC whose callback loses
-	// the race still paints the Edit page (the 9585e71 letter-avatar fix).
+	// Stock ChatEditActivity writes ImageUpdater local file locations (unique
+	// local_ids) and InputFile.id onto the cached bot user, then posts
+	// UPDATE_MASK_AVATAR only after the RPC callback, where hasUploadedPhoto
+	// already blocks setAvatar. A full current-session updateUser (Users with
+	// modern userProfilePhoto#82d1f706) would putUsers those unique local_ids
+	// to synthesized 'c' before initIfEmpty can refetch the profile header
+	// (the 8b2aabe delay avoided that, but then setAvatar never ran and the
+	// Edit header stayed on the letter avatar). Official updateUser is just a
+	// "this user changed" signal: sending that immediately, without a Users
+	// vector, lets setAvatar paint from the still-local ImageUpdater files
+	// and lets ProfileGalleryView.initIfEmpty see the local_id change, while
+	// the delayed full echo (stripped_thumb and the real photo_id) repairs
+	// the cache after the callback. Other owner sessions still get the full
+	// user immediately.
+	r.pushSelfPhotoUpdateToCurrentSessionImmediately(ctx, selfPhotoSignalUpdates(bot.ID, int(r.clock.Now().Unix())))
 	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
+}
+
+func (r *Router) pushSelfPhotoUpdateToCurrentSessionImmediately(ctx context.Context, updates *tg.Updates) {
+	r.pushSelfPhotoUpdateToCurrentSessionWithDelay(ctx, updates, 0)
 }
 
 // defaultSelfPhotoEchoPushDelay is the delay for echoing updateUser to the current session after an
@@ -723,6 +729,16 @@ func selfPhotoUpdates(self domain.User, date int, user tg.UserClass) *tg.Updates
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: self.ID}},
 		Users:   []tg.UserClass{user},
+		Date:    date,
+	}
+}
+
+// selfPhotoSignalUpdates is updateUser without a Users vector. processUpdates
+// still posts UPDATE_MASK_AVATAR, but putUsers does not replace the cached
+// user's unique ImageUpdater photo locations.
+func selfPhotoSignalUpdates(userID int64, date int) *tg.Updates {
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: userID}},
 		Date:    date,
 	}
 }

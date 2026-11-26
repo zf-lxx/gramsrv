@@ -26,6 +26,7 @@ type captureSessions struct {
 	sessionPushes      int
 	sessionPushID      int64
 	sessionMessage     bin.Encoder
+	sessionMessages    []bin.Encoder
 	pushUserIDs        []int64
 	onlineUserIDs      []int64
 	channelViewers     map[int64][]int64
@@ -87,6 +88,12 @@ func (s *captureSessions) lastUserPush() bin.Encoder {
 	return s.userMessage
 }
 
+func (s *captureSessions) sessionPushMessages() []bin.Encoder {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]bin.Encoder(nil), s.sessionMessages...)
+}
+
 func (s *captureSessions) lastSessionPush() (int64, bin.Encoder, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,6 +108,7 @@ func (s *captureSessions) clearMessages() {
 	s.sessionMessage = nil
 	s.sessionPushID = 0
 	s.sessionPushes = 0
+	s.sessionMessages = nil
 	s.pushUserIDs = nil
 }
 
@@ -174,6 +182,7 @@ func (s *captureSessions) PushToSessionForAuthKey(_ context.Context, rawAuthKeyI
 	s.sessionPushID = sessionID
 	s.sessionMessage = msg
 	s.sessionPushes++
+	s.sessionMessages = append(s.sessionMessages, msg)
 	return nil
 }
 
