@@ -659,6 +659,7 @@ func (r *Router) pushSelfPhotoUpdateWithUser(ctx context.Context, self domain.Us
 	updates := selfPhotoUpdates(self, int(r.clock.Now().Unix()), projected)
 	r.pushUserUpdates(ctx, self.ID, updates)
 	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
+	r.pushPhotoUpdateToKnownViewers(ctx, self)
 }
 
 func (r *Router) pushBotPhotoUpdateToOwner(ctx context.Context, ownerUserID int64, bot domain.User, projected *tg.User) {
@@ -677,6 +678,9 @@ func (r *Router) pushBotPhotoUpdateToOwner(ctx context.Context, ownerUserID int6
 	// 'c' too early and skip the profile-header refetch). Other owner
 	// sessions still get the full user immediately.
 	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
+	// Bot-owner sessions are already handled above; other users who have a
+	// dialog with the bot still need a per-viewer updateUser.
+	r.pushPhotoUpdateToKnownViewers(ctx, bot, ownerUserID)
 }
 
 // defaultSelfPhotoEchoPushDelay is the delay for echoing updateUser to the current session after an
@@ -690,6 +694,85 @@ const defaultSelfPhotoEchoPushDelay = 500 * time.Millisecond
 // returns).
 func (r *Router) pushSelfPhotoUpdateToCurrentSession(ctx context.Context, updates *tg.Updates) {
 	r.pushSelfPhotoUpdateToCurrentSessionWithDelay(ctx, updates, r.selfPhotoEchoPushDelay)
+}
+
+// pushPhotoUpdateToKnownViewers fans a non-PTS updateUser out to contacts and
+// private-dialog peers who already know the subject, so official/Owpengram
+// chat lists refresh a new or cleared avatar without opening the profile.
+// Upstream gramsrv only pushes to the subject's own sessions (or a bot's
+// owner). Each recipient gets a User projected for that viewer, so a
+// contacts-only or otherwise hidden profile photo is not leaked. The photo
+// subject, and any caller-supplied skip IDs (the bot owner, whose sessions
+// are already handled by pushBotPhotoUpdateToOwner), are never treated as
+// "other users" here. Owner/other-device and delayed current-session echoes
+// stay on the existing self/owner paths.
+func (r *Router) pushPhotoUpdateToKnownViewers(ctx context.Context, subject domain.User, skipUserIDs ...int64) {
+	if r == nil || subject.ID == 0 || r.deps.Users == nil {
+		return
+	}
+	service, ok := r.deps.Users.(moderationUserAudienceService)
+	if !ok {
+		return
+	}
+	viewers, err := service.ModerationFlagAudience(ctx, subject.ID, 4096)
+	if err != nil {
+		r.log.Warn("list profile photo update audience",
+			zap.Int64("target_user_id", subject.ID),
+			zap.Error(err))
+		return
+	}
+	skip := make(map[int64]struct{}, 1+len(skipUserIDs))
+	skip[subject.ID] = struct{}{}
+	for _, id := range skipUserIDs {
+		if id != 0 {
+			skip[id] = struct{}{}
+		}
+	}
+	pushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	subjectPeer := domain.Peer{Type: domain.PeerTypeUser, ID: subject.ID}
+	botVerificationIcon := r.peerBotVerificationIcon(pushCtx, subjectPeer)
+	usernames := r.usernameRegistryMap(pushCtx, []domain.Peer{subjectPeer})
+	seen := make(map[int64]struct{}, len(viewers))
+	dialogs, _ := r.deps.Dialogs.(dialogPeerMetadataInvalidator)
+	for _, viewerUserID := range viewers {
+		if viewerUserID == 0 {
+			continue
+		}
+		if _, skipped := skip[viewerUserID]; skipped {
+			continue
+		}
+		if _, already := seen[viewerUserID]; already {
+			continue
+		}
+		seen[viewerUserID] = struct{}{}
+		if dialogs != nil {
+			// Same getDialogs-hash discipline as NotifyUserModerationFlagsChanged:
+			// the list hash does not describe embedded User photos, so a stale
+			// hash would keep serving the old avatar on the next dialog refresh.
+			dialogs.InvalidateDialog(viewerUserID, subjectPeer)
+		}
+		if online, ok := r.deps.Sessions.(OnlineUserProvider); ok && !online.IsUserOnline(viewerUserID) {
+			continue
+		}
+		users, err := r.deps.Users.ByIDs(pushCtx, viewerUserID, []int64{subject.ID})
+		if err != nil || len(users) == 0 {
+			r.log.Warn("project profile photo update",
+				zap.Int64("viewer_user_id", viewerUserID),
+				zap.Int64("target_user_id", subject.ID),
+				zap.Error(err))
+			continue
+		}
+		projected := tgUsersForViewer(viewerUserID, users)
+		applyBotVerificationIconToUsers(projected, subject.ID, botVerificationIcon)
+		applyUsernamesFromRegistry(projected, nil, usernames)
+		r.pushUserUpdates(pushCtx, viewerUserID, &tg.Updates{
+			Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: subject.ID}},
+			Users:   projected,
+			Date:    int(r.clock.Now().Unix()),
+			Seq:     0,
+		})
+	}
 }
 
 func (r *Router) pushSelfPhotoUpdateToCurrentSessionWithDelay(ctx context.Context, updates *tg.Updates, delay time.Duration) {

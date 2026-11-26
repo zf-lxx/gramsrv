@@ -28,6 +28,7 @@ type captureSessions struct {
 	sessionMessage     bin.Encoder
 	sessionMessages    []bin.Encoder
 	pushUserIDs        []int64
+	userPushes         []captureUserPush
 	onlineUserIDs      []int64
 	channelViewers     map[int64][]int64
 	channelMembers     map[int64][]int64
@@ -47,6 +48,11 @@ type captureSessionsSnapshot struct {
 	receivesCalls   int
 	messageType     proto.MessageType
 	message         bin.Encoder
+}
+
+type captureUserPush struct {
+	userID  int64
+	message bin.Encoder
 }
 
 func (s *captureSessions) snapshot() captureSessionsSnapshot {
@@ -69,6 +75,18 @@ func (s *captureSessions) pushedUserIDs() []int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]int64(nil), s.pushUserIDs...)
+}
+
+func (s *captureSessions) userPushFor(userID int64) bin.Encoder {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var last bin.Encoder
+	for _, push := range s.userPushes {
+		if push.userID == userID {
+			last = push.message
+		}
+	}
+	return last
 }
 
 // onlineChannelMemberIDs returns a snapshot of the currently registered channel
@@ -110,6 +128,7 @@ func (s *captureSessions) clearMessages() {
 	s.sessionPushes = 0
 	s.sessionMessages = nil
 	s.pushUserIDs = nil
+	s.userPushes = nil
 }
 
 func (s *captureSessions) BindAuthKeyForSession(rawAuthKeyID [8]byte, sessionID int64, authKeyID [8]byte) {
@@ -196,6 +215,7 @@ func (s *captureSessions) PushToUserExceptAuthKeySession(_ context.Context, user
 	s.message = msg
 	s.userMessage = msg
 	s.pushUserIDs = append(s.pushUserIDs, userID)
+	s.userPushes = append(s.userPushes, captureUserPush{userID: userID, message: msg})
 	return 1, nil
 }
 

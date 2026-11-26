@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	botsapp "telesrv/internal/app/bots"
+	appprivacy "telesrv/internal/app/privacy"
 	appusers "telesrv/internal/app/users"
 	"telesrv/internal/domain"
 	"telesrv/internal/store/memory"
@@ -625,5 +626,276 @@ func TestUploadProfilePhotoFallbackEmojiAndInvalidFlags(t *testing.T) {
 	}
 	if cur, ok, err := files.CurrentProfilePhotoKind(ctx, domain.PeerTypeUser, owner.ID, domain.ProfilePhotoKindProfile); err != nil || !ok || cur.ID != 778 {
 		t.Fatalf("current profile photo after invalid = %+v ok=%v err=%v, want preserved 778", cur, ok, err)
+	}
+}
+
+type photoAudienceUsers struct {
+	UsersService
+	audience []int64
+}
+
+func (s *photoAudienceUsers) ModerationFlagAudience(_ context.Context, _ int64, _ int) ([]int64, error) {
+	return append([]int64(nil), s.audience...), nil
+}
+
+func photoUpdateForViewer(t *testing.T, sessions *captureSessions, viewerUserID, subjectUserID int64) (*tg.Updates, *tg.User) {
+	t.Helper()
+	msg := sessions.userPushFor(viewerUserID)
+	updates, ok := msg.(*tg.Updates)
+	if !ok {
+		t.Fatalf("push to user %d = %T, want *tg.Updates", viewerUserID, msg)
+	}
+	if updates.Seq != 0 {
+		t.Fatalf("push to user %d seq=%d, want a non-PTS updateUser (updates#74ae4240 has no pts)", viewerUserID, updates.Seq)
+	}
+	hasUserUpdate := false
+	for _, u := range updates.Updates {
+		if uu, ok := u.(*tg.UpdateUser); ok && uu.UserID == subjectUserID {
+			hasUserUpdate = true
+		}
+	}
+	if !hasUserUpdate {
+		t.Fatalf("push to user %d updates = %+v, want UpdateUser for %d", viewerUserID, updates.Updates, subjectUserID)
+	}
+	if len(updates.Users) == 0 {
+		t.Fatalf("push to user %d missing Users", viewerUserID)
+	}
+	user, ok := updates.Users[0].(*tg.User)
+	if !ok || user.ID != subjectUserID {
+		t.Fatalf("push to user %d user = %T %+v, want user %d", viewerUserID, updates.Users[0], updates.Users[0], subjectUserID)
+	}
+	return updates, user
+}
+
+func requireUserProfilePhoto(t *testing.T, user *tg.User, photoID int64) *tg.UserProfilePhoto {
+	t.Helper()
+	photo, ok := user.Photo.(*tg.UserProfilePhoto)
+	if !ok || photo.PhotoID != photoID {
+		t.Fatalf("user %d photo = %+v, want photo_id=%d", user.ID, user.Photo, photoID)
+	}
+	if thumb, ok := photo.GetStrippedThumb(); !ok || len(thumb) < 3 || thumb[0] != 0x01 {
+		t.Fatalf("user %d stripped_thumb = %v ok=%v, want official type-i payload", user.ID, thumb, ok)
+	}
+	return photo
+}
+
+func TestUploadProfilePhotoPushesUpdateToContactsAndDialogPeers(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	owner, _ := userStore.Create(ctx, domain.User{AccessHash: 11, Phone: "15550002001", FirstName: "Owner"})
+	contact, _ := userStore.Create(ctx, domain.User{AccessHash: 12, Phone: "15550002002", FirstName: "Contact"})
+	dialogPeer, _ := userStore.Create(ctx, domain.User{AccessHash: 13, Phone: "15550002003", FirstName: "Dialog"})
+	stranger, _ := userStore.Create(ctx, domain.User{AccessHash: 14, Phone: "15550002004", FirstName: "Stranger"})
+	offlineContact, _ := userStore.Create(ctx, domain.User{AccessHash: 15, Phone: "15550002005", FirstName: "Offline"})
+	files := &fakeFiles{}
+	users := &photoAudienceUsers{
+		UsersService: appusers.NewService(userStore, appusers.WithPhotoProvider(files)),
+		audience:     []int64{owner.ID, contact.ID, dialogPeer.ID, offlineContact.ID},
+	}
+	sessions := &captureSessions{onlineUserIDs: []int64{owner.ID, contact.ID, dialogPeer.ID, stranger.ID}}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Users:    users,
+		Files:    files,
+		Sessions: sessions,
+	}, zaptest.NewLogger(t), clock.System)
+	r.selfPhotoEchoPushDelay = 0
+
+	req := &tg.PhotosUploadProfilePhotoRequest{}
+	req.SetFile(&tg.InputFile{ID: 42, Parts: 1, Name: "a.jpg"})
+	if _, err := r.onPhotosUploadProfilePhoto(WithUserID(ctx, owner.ID), req); err != nil {
+		t.Fatalf("uploadProfilePhoto: %v", err)
+	}
+
+	pushed := sessions.pushedUserIDs()
+	if len(pushed) != 3 || pushed[0] != owner.ID {
+		t.Fatalf("pushed user ids = %v, want owner first, then contact and dialog peer", pushed)
+	}
+	wantOther := map[int64]int{contact.ID: 0, dialogPeer.ID: 0}
+	for _, id := range pushed[1:] {
+		if _, ok := wantOther[id]; !ok {
+			t.Fatalf("unexpected viewer push to %d in %v", id, pushed)
+		}
+		wantOther[id]++
+	}
+	for id, n := range wantOther {
+		if n != 1 {
+			t.Fatalf("viewer %d pushed %d times, want 1; all=%v", id, n, pushed)
+		}
+	}
+	for _, unexpected := range []int64{stranger.ID, offlineContact.ID} {
+		if sessions.userPushFor(unexpected) != nil {
+			t.Fatalf("user %d received a photo update, want none", unexpected)
+		}
+	}
+
+	_, ownerUser := photoUpdateForViewer(t, sessions, owner.ID, owner.ID)
+	requireUserProfilePhoto(t, ownerUser, 778)
+	_, contactUser := photoUpdateForViewer(t, sessions, contact.ID, owner.ID)
+	requireUserProfilePhoto(t, contactUser, 778)
+	_, dialogUser := photoUpdateForViewer(t, sessions, dialogPeer.ID, owner.ID)
+	requireUserProfilePhoto(t, dialogUser, 778)
+
+	sessions.clearMessages()
+	const currentSessionID = int64(474747)
+	reqCtx := WithSessionID(WithUserID(ctx, owner.ID), currentSessionID)
+	if _, err := r.onPhotosDeletePhotos(reqCtx, []tg.InputPhotoClass{&tg.InputPhoto{ID: 778}}); err != nil {
+		t.Fatalf("deletePhotos: %v", err)
+	}
+	if sessions.userPushFor(stranger.ID) != nil || sessions.userPushFor(offlineContact.ID) != nil {
+		t.Fatalf("delete pushed to stranger or offline contact: %v", sessions.pushedUserIDs())
+	}
+	_, clearedOwner := photoUpdateForViewer(t, sessions, owner.ID, owner.ID)
+	if _, stillHasPhoto := clearedOwner.Photo.(*tg.UserProfilePhoto); stillHasPhoto {
+		t.Fatalf("owner photo after delete = %+v, want cleared", clearedOwner.Photo)
+	}
+	_, clearedContact := photoUpdateForViewer(t, sessions, contact.ID, owner.ID)
+	if _, stillHasPhoto := clearedContact.Photo.(*tg.UserProfilePhoto); stillHasPhoto {
+		t.Fatalf("contact photo after delete = %+v, want cleared", clearedContact.Photo)
+	}
+	_, clearedDialog := photoUpdateForViewer(t, sessions, dialogPeer.ID, owner.ID)
+	if _, stillHasPhoto := clearedDialog.Photo.(*tg.UserProfilePhoto); stillHasPhoto {
+		t.Fatalf("dialog peer photo after delete = %+v, want cleared", clearedDialog.Photo)
+	}
+	if sessionID, _, _ := sessions.lastSessionPush(); sessionID != currentSessionID {
+		t.Fatalf("current-session echo after delete = %d, want %d", sessionID, currentSessionID)
+	}
+}
+
+func TestUploadProfilePhotoHidesContactsOnlyPhotoFromNonContacts(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	contactStore := memory.NewContactStore()
+	privacyStore := memory.NewPrivacyStore()
+	owner, _ := userStore.Create(ctx, domain.User{AccessHash: 21, Phone: "15550002101", FirstName: "Owner"})
+	contact, _ := userStore.Create(ctx, domain.User{AccessHash: 22, Phone: "15550002102", FirstName: "Contact"})
+	dialogPeer, _ := userStore.Create(ctx, domain.User{AccessHash: 23, Phone: "15550002103", FirstName: "Dialog"})
+	stranger, _ := userStore.Create(ctx, domain.User{AccessHash: 24, Phone: "15550002104", FirstName: "Stranger"})
+	if _, err := contactStore.Upsert(ctx, owner.ID, domain.ContactInput{ContactUserID: contact.ID, FirstName: "Contact"}); err != nil {
+		t.Fatalf("add contact: %v", err)
+	}
+	privacy := appprivacy.NewService(privacyStore, contactStore)
+	if _, err := privacy.SetRules(ctx, owner.ID, domain.PrivacyKeyProfilePhoto, []domain.PrivacyRule{{Kind: domain.PrivacyRuleAllowContacts}}); err != nil {
+		t.Fatalf("set contacts-only profile photo: %v", err)
+	}
+	files := &fakeFiles{}
+	users := &photoAudienceUsers{
+		UsersService: appusers.NewService(userStore,
+			appusers.WithPhotoProvider(files),
+			appusers.WithContactStore(contactStore),
+			appusers.WithPrivacyEvaluator(privacy),
+		),
+		audience: []int64{owner.ID, contact.ID, dialogPeer.ID},
+	}
+	sessions := &captureSessions{onlineUserIDs: []int64{owner.ID, contact.ID, dialogPeer.ID, stranger.ID}}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Users:    users,
+		Files:    files,
+		Sessions: sessions,
+	}, zaptest.NewLogger(t), clock.System)
+
+	req := &tg.PhotosUploadProfilePhotoRequest{}
+	req.SetFile(&tg.InputFile{ID: 42, Parts: 1, Name: "private.jpg"})
+	if _, err := r.onPhotosUploadProfilePhoto(WithUserID(ctx, owner.ID), req); err != nil {
+		t.Fatalf("uploadProfilePhoto: %v", err)
+	}
+	if sessions.userPushFor(stranger.ID) != nil {
+		t.Fatalf("stranger received a photo update: %v", sessions.pushedUserIDs())
+	}
+	_, ownerUser := photoUpdateForViewer(t, sessions, owner.ID, owner.ID)
+	requireUserProfilePhoto(t, ownerUser, 778)
+	_, contactUser := photoUpdateForViewer(t, sessions, contact.ID, owner.ID)
+	requireUserProfilePhoto(t, contactUser, 778)
+	_, hiddenUser := photoUpdateForViewer(t, sessions, dialogPeer.ID, owner.ID)
+	if _, leaked := hiddenUser.Photo.(*tg.UserProfilePhoto); leaked {
+		t.Fatalf("non-contact dialog peer photo = %+v, want hidden (no userProfilePhoto leak)", hiddenUser.Photo)
+	}
+}
+
+func TestUpdateProfilePhotoPushesUpdateToKnownViewers(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	owner, _ := userStore.Create(ctx, domain.User{AccessHash: 31, Phone: "15550002201", FirstName: "Owner"})
+	contact, _ := userStore.Create(ctx, domain.User{AccessHash: 32, Phone: "15550002202", FirstName: "Contact"})
+	files := &fakeFiles{}
+	users := &photoAudienceUsers{
+		UsersService: appusers.NewService(userStore, appusers.WithPhotoProvider(files)),
+		audience:     []int64{owner.ID, contact.ID},
+	}
+	sessions := &captureSessions{onlineUserIDs: []int64{owner.ID, contact.ID}}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Users:    users,
+		Files:    files,
+		Sessions: sessions,
+	}, zaptest.NewLogger(t), clock.System)
+
+	upload := &tg.PhotosUploadProfilePhotoRequest{}
+	upload.SetFile(&tg.InputFile{ID: 42, Parts: 1, Name: "a.jpg"})
+	if _, err := r.onPhotosUploadProfilePhoto(WithUserID(ctx, owner.ID), upload); err != nil {
+		t.Fatalf("seed profile photo: %v", err)
+	}
+	sessions.clearMessages()
+
+	cleared, err := r.onPhotosUpdateProfilePhoto(WithUserID(ctx, owner.ID), &tg.PhotosUpdateProfilePhotoRequest{ID: &tg.InputPhotoEmpty{}})
+	if err != nil {
+		t.Fatalf("updateProfilePhoto clear: %v", err)
+	}
+	if firstPhotosUser(t, cleared).Photo != nil {
+		t.Fatalf("cleared RPC user photo = %+v, want empty", firstPhotosUser(t, cleared).Photo)
+	}
+	_, contactUser := photoUpdateForViewer(t, sessions, contact.ID, owner.ID)
+	if _, stillHasPhoto := contactUser.Photo.(*tg.UserProfilePhoto); stillHasPhoto {
+		t.Fatalf("contact photo after updateProfilePhoto clear = %+v, want cleared", contactUser.Photo)
+	}
+}
+
+func TestUploadProfilePhotoBotTargetPushesToDialogPeer(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	botStore := memory.NewBotStore(userStore)
+	dialogStore := memory.NewDialogStore()
+	bots := botsapp.NewService(userStore, botStore, memory.NewMessageStore(dialogStore))
+	owner, _ := userStore.Create(ctx, domain.User{AccessHash: 41, Phone: "15550002301", FirstName: "Owner"})
+	dialogPeer, _ := userStore.Create(ctx, domain.User{AccessHash: 42, Phone: "15550002302", FirstName: "User"})
+	stranger, _ := userStore.Create(ctx, domain.User{AccessHash: 43, Phone: "15550002303", FirstName: "Stranger"})
+	bot, _, err := bots.CreateBot(ctx, owner.ID, "Fanout Bot", "fanout_shape_bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	files := &fakeFiles{}
+	users := &photoAudienceUsers{
+		UsersService: appusers.NewService(userStore, appusers.WithPhotoProvider(files)),
+		audience:     []int64{bot.ID, owner.ID, dialogPeer.ID},
+	}
+	sessions := &captureSessions{onlineUserIDs: []int64{owner.ID, dialogPeer.ID, stranger.ID}}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Users:    users,
+		Bots:     bots,
+		Files:    files,
+		Sessions: sessions,
+	}, zaptest.NewLogger(t), clock.System)
+	r.selfPhotoEchoPushDelay = 0
+
+	const currentSessionID = int64(484848)
+	reqCtx := WithSessionID(WithUserID(ctx, owner.ID), currentSessionID)
+	req := &tg.PhotosUploadProfilePhotoRequest{}
+	req.SetBot(&tg.InputUser{UserID: bot.ID, AccessHash: bot.AccessHash})
+	req.SetFile(&tg.InputFile{ID: 42, Parts: 1, Name: "bot.jpg"})
+	if _, err := r.onPhotosUploadProfilePhoto(reqCtx, req); err != nil {
+		t.Fatalf("upload bot profile photo: %v", err)
+	}
+
+	pushed := sessions.pushedUserIDs()
+	if len(pushed) != 2 || pushed[0] != owner.ID || pushed[1] != dialogPeer.ID {
+		t.Fatalf("pushed user ids = %v, want owner %d then dialog peer %d (bot and stranger excluded)", pushed, owner.ID, dialogPeer.ID)
+	}
+	if sessions.userPushFor(stranger.ID) != nil || sessions.userPushFor(bot.ID) != nil {
+		t.Fatalf("bot or stranger received a photo update: %v", pushed)
+	}
+	_, ownerBot := photoUpdateForViewer(t, sessions, owner.ID, bot.ID)
+	requireUserProfilePhoto(t, ownerBot, 778)
+	_, dialogBot := photoUpdateForViewer(t, sessions, dialogPeer.ID, bot.ID)
+	requireUserProfilePhoto(t, dialogBot, 778)
+	if sessionID, msg, pushes := sessions.lastSessionPush(); sessionID != currentSessionID || pushes != 1 {
+		t.Fatalf("current-session echo session=%d pushes=%d msg=%T, want one echo on %d", sessionID, pushes, msg, currentSessionID)
 	}
 }
