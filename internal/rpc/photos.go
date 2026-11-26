@@ -667,18 +667,20 @@ func (r *Router) pushBotPhotoUpdateToOwner(ctx context.Context, ownerUserID int6
 	}
 	updates := selfPhotoUpdates(bot, int(r.clock.Now().Unix()), projected)
 	r.pushUserUpdates(ctx, ownerUserID, updates)
-	// Official servers emit updateUser to the current session as part of the
-	// upload. DrKLO's bot Edit screen (ChatEditActivity) applies that update
-	// only while hasUploadedPhoto is still false, which it sets in the RPC
-	// response callback. A delayed echo arrives too late, and without
-	// stripped_thumb the header stays on the letter avatar even though the
-	// photo was saved. Self avatars keep the delayed echo (has_video
-	// overwrite workaround).
-	r.pushSelfPhotoUpdateToCurrentSessionImmediately(ctx, updates)
-}
-
-func (r *Router) pushSelfPhotoUpdateToCurrentSessionImmediately(ctx context.Context, updates *tg.Updates) {
-	r.pushSelfPhotoUpdateToCurrentSessionWithDelay(ctx, updates, 0)
+	// Official current-layer servers emit updateUser (updateUserPhoto is no
+	// longer in the schema) with modern userProfilePhoto#82d1f706. Android
+	// synthesizes that constructor's photo_big as local_id='c', so a new
+	// photo_id does not look like a location change. Stock ChatEditActivity
+	// mutates the cached bot user in place with unique ImageUpdater local_ids,
+	// then posts UPDATE_MASK_AVATAR in the photos.uploadProfilePhoto callback.
+	// ProfileGalleryView.initIfEmpty refetches photos.getUserPhotos only when
+	// that local_id changes; an immediate current-session echo replaces those
+	// unique ids with 'c' before the callback, and a back-stacked
+	// ProfileActivity keeps the old full-bleed header. Official timing, and
+	// the self-avatar path, deliver the echo after the callback. Keep
+	// stripped_thumb on the echoed user so a slow RPC whose callback loses
+	// the race still paints the Edit page (the 9585e71 letter-avatar fix).
+	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
 }
 
 // defaultSelfPhotoEchoPushDelay is the delay for echoing updateUser to the current session after an

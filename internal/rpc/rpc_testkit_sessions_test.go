@@ -23,6 +23,9 @@ type captureSessions struct {
 	messageType        proto.MessageType
 	message            bin.Encoder
 	userMessage        bin.Encoder // the most recent PushToUser* message (distinct from message: message is also overwritten by PushToSession)
+	sessionPushes      int
+	sessionPushID      int64
+	sessionMessage     bin.Encoder
 	pushUserIDs        []int64
 	onlineUserIDs      []int64
 	channelViewers     map[int64][]int64
@@ -84,11 +87,20 @@ func (s *captureSessions) lastUserPush() bin.Encoder {
 	return s.userMessage
 }
 
+func (s *captureSessions) lastSessionPush() (int64, bin.Encoder, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionPushID, s.sessionMessage, s.sessionPushes
+}
+
 func (s *captureSessions) clearMessages() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.message = nil
 	s.userMessage = nil
+	s.sessionMessage = nil
+	s.sessionPushID = 0
+	s.sessionPushes = 0
 	s.pushUserIDs = nil
 }
 
@@ -159,6 +171,9 @@ func (s *captureSessions) PushToSessionForAuthKey(_ context.Context, rawAuthKeyI
 	s.sessionID = sessionID
 	s.messageType = t
 	s.message = msg
+	s.sessionPushID = sessionID
+	s.sessionMessage = msg
+	s.sessionPushes++
 	return nil
 }
 

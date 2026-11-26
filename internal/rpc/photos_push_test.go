@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/tg"
@@ -337,7 +338,7 @@ func TestUploadProfilePhotoBotTargetUpdatesOwnedBot(t *testing.T) {
 	}
 }
 
-func TestUploadProfilePhotoBotTargetEchoesImmediatelyWhenSelfEchoIsDelayed(t *testing.T) {
+func TestUploadProfilePhotoBotTargetDelaysCurrentSessionEchoLikeSelf(t *testing.T) {
 	ctx := context.Background()
 	userStore := memory.NewUserStore()
 	botStore := memory.NewBotStore(userStore)
@@ -356,11 +357,11 @@ func TestUploadProfilePhotoBotTargetEchoesImmediatelyWhenSelfEchoIsDelayed(t *te
 		Files:    files,
 		Sessions: sessions,
 	}, zaptest.NewLogger(t), clock.System)
-	// Keep the self-avatar delay; a bot upload must still reach the current
-	// session before ChatEditActivity sets hasUploadedPhoto.
-	if r.selfPhotoEchoPushDelay <= 0 {
-		r.selfPhotoEchoPushDelay = defaultSelfPhotoEchoPushDelay
-	}
+	// Short delay so the test can observe the official-like window: the RPC
+	// result is written, then the current session is echoed. Production uses
+	// defaultSelfPhotoEchoPushDelay (500ms), the same as self avatars.
+	const echoDelay = 30 * time.Millisecond
+	r.selfPhotoEchoPushDelay = echoDelay
 
 	const currentSessionID = int64(464646)
 	reqCtx := WithSessionID(WithUserID(ctx, owner.ID), currentSessionID)
@@ -370,27 +371,42 @@ func TestUploadProfilePhotoBotTargetEchoesImmediatelyWhenSelfEchoIsDelayed(t *te
 	if _, err := r.onPhotosUploadProfilePhoto(reqCtx, req); err != nil {
 		t.Fatalf("upload bot profile photo: %v", err)
 	}
-	snap := sessions.snapshot()
-	if snap.sessionID != currentSessionID {
-		t.Fatalf("echo session = %d, want immediate current session %d", snap.sessionID, currentSessionID)
+
+	other, ok := sessions.lastUserPush().(*tg.Updates)
+	if !ok || len(other.Users) == 0 {
+		t.Fatalf("other-device push = %T, want immediate *tg.Updates with the bot user", sessions.lastUserPush())
 	}
-	echoed, ok := snap.message.(*tg.Updates)
-	if !ok {
-		t.Fatalf("echoed message = %T, want *tg.Updates delivered immediately", snap.message)
+	if _, _, pushes := sessions.lastSessionPush(); pushes != 0 {
+		t.Fatalf("current-session echo arrived with the RPC result (%d pushes), want it delayed like official/self", pushes)
 	}
-	if len(echoed.Users) == 0 {
-		t.Fatalf("immediate echo had no users: %+v", echoed)
+
+	deadline := time.Now().Add(time.Second)
+	var echoed *tg.Updates
+	for time.Now().Before(deadline) {
+		sessionID, msg, pushes := sessions.lastSessionPush()
+		if pushes > 0 {
+			var ok bool
+			echoed, ok = msg.(*tg.Updates)
+			if !ok || sessionID != currentSessionID {
+				t.Fatalf("delayed echo session=%d msg=%T, want current session %d *tg.Updates", sessionID, msg, currentSessionID)
+			}
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if echoed == nil || len(echoed.Users) == 0 {
+		t.Fatal("current session never received the delayed updateUser echo")
 	}
 	echoedBot, ok := echoed.Users[0].(*tg.User)
 	if !ok || echoedBot.ID != bot.ID {
-		t.Fatalf("immediate echoed user = %T %+v, want bot %d", echoed.Users[0], echoed.Users[0], bot.ID)
+		t.Fatalf("delayed echoed user = %T %+v, want bot %d", echoed.Users[0], echoed.Users[0], bot.ID)
 	}
 	echoedPhoto, ok := echoedBot.Photo.(*tg.UserProfilePhoto)
 	if !ok || echoedPhoto.PhotoID != 778 {
-		t.Fatalf("immediate echoed photo = %+v, want photo_id=778", echoedBot.Photo)
+		t.Fatalf("delayed echoed photo = %+v, want photo_id=778", echoedBot.Photo)
 	}
 	if thumb, ok := echoedPhoto.GetStrippedThumb(); !ok || len(thumb) < 3 || thumb[0] != 0x01 {
-		t.Fatalf("immediate echoed stripped_thumb = %v ok=%v, want official type-i payload", thumb, ok)
+		t.Fatalf("delayed echoed stripped_thumb = %v ok=%v, want official type-i payload", thumb, ok)
 	}
 }
 
