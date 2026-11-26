@@ -263,6 +263,23 @@ func TestUploadProfilePhotoBotTargetUpdatesOwnedBot(t *testing.T) {
 	if !ok || returnedPhoto.PhotoID != 778 || returnedPhoto.DCID != 2 {
 		t.Fatalf("returned bot photo = %+v, want photo_id=778 dc_id=2", returnedBot.Photo)
 	}
+	if thumb, ok := returnedPhoto.GetStrippedThumb(); !ok || len(thumb) < 3 || thumb[0] != 0x01 {
+		t.Fatalf("returned bot stripped_thumb = %v ok=%v, want official type-i payload", thumb, ok)
+	}
+	if photo, ok := got.Photo.(*tg.Photo); !ok {
+		t.Fatalf("returned photos.photo = %T, want *tg.Photo", got.Photo)
+	} else {
+		hasStripped := false
+		for _, size := range photo.Sizes {
+			if _, ok := size.(*tg.PhotoStrippedSize); ok && size.(*tg.PhotoStrippedSize).Type == "i" {
+				hasStripped = true
+				break
+			}
+		}
+		if !hasStripped {
+			t.Fatalf("returned photo sizes = %+v, want a photoStrippedSize of type i", photo.Sizes)
+		}
+	}
 
 	if pushed := sessions.pushedUserIDs(); len(pushed) != 1 || pushed[0] != owner.ID {
 		t.Fatalf("pushed user ids = %v, want owner %d", pushed, owner.ID)
@@ -292,6 +309,9 @@ func TestUploadProfilePhotoBotTargetUpdatesOwnedBot(t *testing.T) {
 	if echoedBot.ID != bot.ID || echoedBot.Self || !ok || echoedPhoto.PhotoID != 778 {
 		t.Fatalf("echoed bot = %+v photo=%+v, want updated non-self bot", echoedBot, echoedBot.Photo)
 	}
+	if thumb, ok := echoedPhoto.GetStrippedThumb(); !ok || len(thumb) < 3 || thumb[0] != 0x01 {
+		t.Fatalf("echoed bot stripped_thumb = %v ok=%v, want official type-i payload", thumb, ok)
+	}
 
 	sessions.clearMessages()
 	clearReq := &tg.PhotosUpdateProfilePhotoRequest{ID: &tg.InputPhotoEmpty{}}
@@ -314,6 +334,63 @@ func TestUploadProfilePhotoBotTargetUpdatesOwnedBot(t *testing.T) {
 	echoedBot, ok = echoed.Users[0].(*tg.User)
 	if !ok || echoedBot.ID != bot.ID || echoedBot.Photo != nil {
 		t.Fatalf("clear echoed bot = %T %+v, want bot without photo", echoed.Users[0], echoed.Users[0])
+	}
+}
+
+func TestUploadProfilePhotoBotTargetEchoesImmediatelyWhenSelfEchoIsDelayed(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	botStore := memory.NewBotStore(userStore)
+	dialogStore := memory.NewDialogStore()
+	bots := botsapp.NewService(userStore, botStore, memory.NewMessageStore(dialogStore))
+	owner, _ := userStore.Create(ctx, domain.User{AccessHash: 11, Phone: "15550001016", FirstName: "Owner"})
+	bot, _, err := bots.CreateBot(ctx, owner.ID, "Delay Bot", "delay_shape_bot")
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	sessions := &captureSessions{}
+	files := &fakeFiles{}
+	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{
+		Users:    appusers.NewService(userStore, appusers.WithPhotoProvider(files)),
+		Bots:     bots,
+		Files:    files,
+		Sessions: sessions,
+	}, zaptest.NewLogger(t), clock.System)
+	// Keep the self-avatar delay; a bot upload must still reach the current
+	// session before ChatEditActivity sets hasUploadedPhoto.
+	if r.selfPhotoEchoPushDelay <= 0 {
+		r.selfPhotoEchoPushDelay = defaultSelfPhotoEchoPushDelay
+	}
+
+	const currentSessionID = int64(464646)
+	reqCtx := WithSessionID(WithUserID(ctx, owner.ID), currentSessionID)
+	req := &tg.PhotosUploadProfilePhotoRequest{}
+	req.SetBot(&tg.InputUser{UserID: bot.ID, AccessHash: bot.AccessHash})
+	req.SetFile(&tg.InputFile{ID: 42, Parts: 1, Name: "bot.jpg"})
+	if _, err := r.onPhotosUploadProfilePhoto(reqCtx, req); err != nil {
+		t.Fatalf("upload bot profile photo: %v", err)
+	}
+	snap := sessions.snapshot()
+	if snap.sessionID != currentSessionID {
+		t.Fatalf("echo session = %d, want immediate current session %d", snap.sessionID, currentSessionID)
+	}
+	echoed, ok := snap.message.(*tg.Updates)
+	if !ok {
+		t.Fatalf("echoed message = %T, want *tg.Updates delivered immediately", snap.message)
+	}
+	if len(echoed.Users) == 0 {
+		t.Fatalf("immediate echo had no users: %+v", echoed)
+	}
+	echoedBot, ok := echoed.Users[0].(*tg.User)
+	if !ok || echoedBot.ID != bot.ID {
+		t.Fatalf("immediate echoed user = %T %+v, want bot %d", echoed.Users[0], echoed.Users[0], bot.ID)
+	}
+	echoedPhoto, ok := echoedBot.Photo.(*tg.UserProfilePhoto)
+	if !ok || echoedPhoto.PhotoID != 778 {
+		t.Fatalf("immediate echoed photo = %+v, want photo_id=778", echoedBot.Photo)
+	}
+	if thumb, ok := echoedPhoto.GetStrippedThumb(); !ok || len(thumb) < 3 || thumb[0] != 0x01 {
+		t.Fatalf("immediate echoed stripped_thumb = %v ok=%v, want official type-i payload", thumb, ok)
 	}
 }
 

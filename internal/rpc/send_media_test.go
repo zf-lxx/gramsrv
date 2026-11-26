@@ -582,6 +582,7 @@ func fakeAvatarStaticSizes() []domain.PhotoSize {
 		{Kind: domain.PhotoSizeKindDefault, Type: "s", W: 150, H: 150, Size: 900},
 		{Kind: domain.PhotoSizeKindDefault, Type: "a", W: 160, H: 160, Size: 1024},
 		{Kind: domain.PhotoSizeKindDefault, Type: "c", W: 640, H: 640, Size: 1024},
+		{Kind: domain.PhotoSizeKindStripped, Type: "i", Bytes: []byte{0x01, 40, 40, 0xAA}},
 	}
 }
 func (f *fakeFiles) CreateDocumentFromUpload(_ context.Context, _ domain.UploadedFileRef, spec domain.DocumentSpec) (domain.Document, error) {

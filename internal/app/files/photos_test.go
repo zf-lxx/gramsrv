@@ -367,11 +367,14 @@ func TestCreateAvatarFromUploadStoresRealSizedRenditions(t *testing.T) {
 		"a": {X: 160, Y: 160},
 		"c": {X: 640, Y: 480},
 	}
-	if len(photo.Sizes) != len(wants) {
-		t.Fatalf("avatar sizes = %+v, want s/a/c", photo.Sizes)
+	if !hasOfficialAvatarSizes(photo) {
+		t.Fatalf("avatar sizes = %+v, want s/a/c plus official type-i stripped thumb", photo.Sizes)
 	}
 	objectKeys := map[string]struct{}{}
 	for _, size := range photo.Sizes {
+		if size.Kind == domain.PhotoSizeKindStripped {
+			continue
+		}
 		want, ok := wants[size.Type]
 		if !ok || size.W != want.X || size.H != want.Y {
 			t.Fatalf("avatar size = %+v, want one of %v", size, wants)
@@ -879,6 +882,9 @@ func TestEnsureAvatarPhotoCreatesSeparateAvatarForMessagePhoto(t *testing.T) {
 	gotTypes := make([]string, 0, len(avatar.Sizes))
 	for _, size := range avatar.Sizes {
 		gotTypes = append(gotTypes, size.Type)
+		if size.Kind == domain.PhotoSizeKindStripped {
+			continue
+		}
 		blob, found, err := media.GetFileBlob(ctx, fmt.Sprintf("photo:%d:%s", avatar.ID, size.Type))
 		if err != nil || !found {
 			t.Fatalf("avatar blob %s found=%v err=%v", size.Type, found, err)
@@ -888,8 +894,8 @@ func TestEnsureAvatarPhotoCreatesSeparateAvatarForMessagePhoto(t *testing.T) {
 			t.Fatalf("avatar blob %s len=%d err=%v, want %d bytes", size.Type, len(data), err, size.Size)
 		}
 	}
-	if !reflect.DeepEqual(gotTypes, []string{"s", "a", "c"}) {
-		t.Fatalf("avatar size types = %v, want [s a c]", gotTypes)
+	if !reflect.DeepEqual(gotTypes, []string{"s", "a", "c", "i"}) {
+		t.Fatalf("avatar size types = %v, want [s a c i]", gotTypes)
 	}
 	if c := avatar.Sizes[2]; c.W != 640 || c.H != 480 {
 		t.Fatalf("avatar c = %dx%d, want the 640x480 source", c.W, c.H)
@@ -949,8 +955,8 @@ func TestEnsureAvatarPhotoRendersFromLargestStoredSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureAvatarPhoto: %v", err)
 	}
-	if avatar.ID == source.ID || len(avatar.Sizes) != 3 {
-		t.Fatalf("avatar = %+v, want a new photo with s/a/c", avatar)
+	if avatar.ID == source.ID || !hasOfficialAvatarSizes(avatar) {
+		t.Fatalf("avatar = %+v, want a new photo with s/a/c plus official type-i stripped thumb", avatar)
 	}
 	if c := avatar.Sizes[2]; c.Type != "c" || c.W != 1280 || c.H != 960 {
 		t.Fatalf("avatar c = %+v, want 1280x960 from the largest size", c)
@@ -975,8 +981,8 @@ func TestEnsureAvatarPhotoFallsBackToCachedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureAvatarPhoto: %v", err)
 	}
-	if avatar.ID == source.ID || len(avatar.Sizes) != 3 || avatar.Sizes[2].W != 90 || avatar.Sizes[2].H != 90 {
-		t.Fatalf("avatar = %+v, want a new 90x90 avatar", avatar)
+	if avatar.ID == source.ID || !hasOfficialAvatarSizes(avatar) || avatar.Sizes[2].W != 90 || avatar.Sizes[2].H != 90 {
+		t.Fatalf("avatar = %+v, want a new 90x90 avatar with official type-i stripped thumb", avatar)
 	}
 }
 
@@ -1199,4 +1205,21 @@ func TestAvatarUploadRejectsOversizedImagesBeforeDecode(t *testing.T) {
 	if _, err := svc.CreateAvatarFromBytes(context.Background(), valid); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func hasOfficialAvatarSizes(photo domain.Photo) bool {
+	hasS, hasA, hasC, hasI := false, false, false, false
+	for _, size := range photo.Sizes {
+		switch {
+		case size.Type == "s" && size.Kind == domain.PhotoSizeKindDefault:
+			hasS = true
+		case size.Type == "a" && size.Kind == domain.PhotoSizeKindDefault:
+			hasA = true
+		case size.Type == "c" && size.Kind == domain.PhotoSizeKindDefault:
+			hasC = true
+		case size.Type == "i" && size.Kind == domain.PhotoSizeKindStripped && len(size.Bytes) >= 4 && size.Bytes[0] == 0x01:
+			hasI = true
+		}
+	}
+	return hasS && hasA && hasC && hasI
 }

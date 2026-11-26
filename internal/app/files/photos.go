@@ -966,6 +966,14 @@ func (s *Service) putAvatarStaticSizes(ctx context.Context, photoID int64, data 
 			Size: len(rendition),
 		})
 	}
+	// Official profile photos always carry a photoStrippedSize of type "i".
+	// UserProfilePhoto.stripped_thumb is filled from it and is what DrKLO
+	// shows immediately on the bot Edit header; without it the letter
+	// avatar stays up until a later full download (or never, if that screen
+	// has already stopped listening for photo updates).
+	if stripped, ok := avatarStrippedSize(src); ok {
+		sizes = append(sizes, stripped)
+	}
 	return sizes, nil
 }
 

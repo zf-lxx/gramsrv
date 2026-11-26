@@ -667,7 +667,18 @@ func (r *Router) pushBotPhotoUpdateToOwner(ctx context.Context, ownerUserID int6
 	}
 	updates := selfPhotoUpdates(bot, int(r.clock.Now().Unix()), projected)
 	r.pushUserUpdates(ctx, ownerUserID, updates)
-	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
+	// Official servers emit updateUser to the current session as part of the
+	// upload. DrKLO's bot Edit screen (ChatEditActivity) applies that update
+	// only while hasUploadedPhoto is still false, which it sets in the RPC
+	// response callback. A delayed echo arrives too late, and without
+	// stripped_thumb the header stays on the letter avatar even though the
+	// photo was saved. Self avatars keep the delayed echo (has_video
+	// overwrite workaround).
+	r.pushSelfPhotoUpdateToCurrentSessionImmediately(ctx, updates)
+}
+
+func (r *Router) pushSelfPhotoUpdateToCurrentSessionImmediately(ctx context.Context, updates *tg.Updates) {
+	r.pushSelfPhotoUpdateToCurrentSessionWithDelay(ctx, updates, 0)
 }
 
 // defaultSelfPhotoEchoPushDelay is the delay for echoing updateUser to the current session after an
@@ -680,6 +691,10 @@ const defaultSelfPhotoEchoPushDelay = 500 * time.Millisecond
 // session. The ctx value is captured before scheduling (the request ctx is invalid once the handler
 // returns).
 func (r *Router) pushSelfPhotoUpdateToCurrentSession(ctx context.Context, updates *tg.Updates) {
+	r.pushSelfPhotoUpdateToCurrentSessionWithDelay(ctx, updates, r.selfPhotoEchoPushDelay)
+}
+
+func (r *Router) pushSelfPhotoUpdateToCurrentSessionWithDelay(ctx context.Context, updates *tg.Updates, delay time.Duration) {
 	if r.deps.Sessions == nil || updates == nil {
 		return
 	}
@@ -695,11 +710,11 @@ func (r *Router) pushSelfPhotoUpdateToCurrentSession(ctx context.Context, update
 			r.log.Debug("push self photo update to current session", zap.Int64("session_id", sessionID), zap.Error(err))
 		}
 	}
-	if r.selfPhotoEchoPushDelay <= 0 {
+	if delay <= 0 {
 		push()
 		return
 	}
-	time.AfterFunc(r.selfPhotoEchoPushDelay, push)
+	time.AfterFunc(delay, push)
 }
 
 func selfPhotoUpdates(self domain.User, date int, user tg.UserClass) *tg.Updates {

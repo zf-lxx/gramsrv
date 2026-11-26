@@ -90,8 +90,15 @@ func TestBotAvatarsSeedViaRealService(t *testing.T) {
 		if photo.DCID != 2 {
 			t.Fatalf("peer %d photo dc_id = %d, want 2", peerID, photo.DCID)
 		}
-		// Every photo size must have a real downloadable blob.
+		// Downloadable sizes must have a real blob; official type "i" is an
+		// inline photoStrippedSize and is carried in Bytes, not a file location.
+		if !hasOfficialAvatarSizes(photo) {
+			t.Fatalf("peer %d photo %d sizes = %+v, want s/a/c plus official type-i stripped thumb", peerID, photo.ID, photo.Sizes)
+		}
 		for _, size := range photo.Sizes {
+			if size.Kind == domain.PhotoSizeKindStripped || size.Kind == domain.PhotoSizeKindCached || size.Kind == domain.PhotoSizeKindPath {
+				continue
+			}
 			blob, found, err := media.GetFileBlob(ctx, photoBlobKey(photo.ID, size.Type))
 			if err != nil {
 				t.Fatalf("peer %d blob %d:%s: %v", peerID, photo.ID, size.Type, err)
