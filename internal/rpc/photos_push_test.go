@@ -338,7 +338,7 @@ func TestUploadProfilePhotoBotTargetUpdatesOwnedBot(t *testing.T) {
 	}
 }
 
-func TestUploadProfilePhotoBotTargetSignalsThenDelaysFullCurrentSessionEcho(t *testing.T) {
+func TestUploadProfilePhotoBotTargetDelaysFullCurrentSessionEcho(t *testing.T) {
 	ctx := context.Background()
 	userStore := memory.NewUserStore()
 	botStore := memory.NewBotStore(userStore)
@@ -357,9 +357,9 @@ func TestUploadProfilePhotoBotTargetSignalsThenDelaysFullCurrentSessionEcho(t *t
 		Files:    files,
 		Sessions: sessions,
 	}, zaptest.NewLogger(t), clock.System)
-	// Production uses defaultSelfPhotoEchoPushDelay (500ms) for the full
-	// current-session user object. Use a short delay so the test can see
-	// the signal-only update arrive first.
+	// Production uses defaultSelfPhotoEchoPushDelay (500ms) so the RPC
+	// callback can run first. Use a short delay so the test can observe
+	// that the current session is not updated immediately.
 	const echoDelay = 30 * time.Millisecond
 	r.selfPhotoEchoPushDelay = echoDelay
 
@@ -380,6 +380,20 @@ func TestUploadProfilePhotoBotTargetSignalsThenDelaysFullCurrentSessionEcho(t *t
 	if thumb, ok := returnedPhoto.GetStrippedThumb(); !ok || len(thumb) < 3 || thumb[0] != 0x01 {
 		t.Fatalf("photos.photo stripped_thumb = %v ok=%v, want official type-i payload", thumb, ok)
 	}
+	if photo, ok := got.Photo.(*tg.Photo); !ok {
+		t.Fatalf("returned photos.photo = %T, want *tg.Photo", got.Photo)
+	} else {
+		hasStripped := false
+		for _, size := range photo.Sizes {
+			if stripped, ok := size.(*tg.PhotoStrippedSize); ok && stripped.Type == "i" {
+				hasStripped = true
+				break
+			}
+		}
+		if !hasStripped {
+			t.Fatalf("returned photo sizes = %+v, want a photoStrippedSize of type i", photo.Sizes)
+		}
+	}
 
 	other, ok := sessions.lastUserPush().(*tg.Updates)
 	if !ok || len(other.Users) == 0 {
@@ -397,36 +411,19 @@ func TestUploadProfilePhotoBotTargetSignalsThenDelaysFullCurrentSessionEcho(t *t
 		t.Fatalf("other-device stripped_thumb = %v ok=%v, want official type-i payload", thumb, ok)
 	}
 
-	sessionID, firstMsg, pushes := sessions.lastSessionPush()
-	if pushes != 1 || sessionID != currentSessionID {
-		t.Fatalf("immediate current-session pushes=%d session=%d, want 1 signal on %d", pushes, sessionID, currentSessionID)
-	}
-	signal, ok := firstMsg.(*tg.Updates)
-	if !ok {
-		t.Fatalf("immediate current-session message = %T, want *tg.Updates", firstMsg)
-	}
-	hasBotUpdate := false
-	for _, u := range signal.Updates {
-		if uu, ok := u.(*tg.UpdateUser); ok && uu.UserID == bot.ID {
-			hasBotUpdate = true
-		}
-	}
-	if !hasBotUpdate {
-		t.Fatalf("immediate signal = %+v, want UpdateUser for the bot", signal.Updates)
-	}
-	if len(signal.Users) != 0 {
-		t.Fatalf("immediate signal users = %d, want none so ImageUpdater local_ids stay on the cached user", len(signal.Users))
+	if sessionID, msg, pushes := sessions.lastSessionPush(); pushes != 0 {
+		t.Fatalf("immediate current-session pushes=%d session=%d msg=%T, want none until the delayed full echo", pushes, sessionID, msg)
 	}
 
 	deadline := time.Now().Add(time.Second)
 	var echoed *tg.Updates
 	for time.Now().Before(deadline) {
 		sessionID, msg, pushes := sessions.lastSessionPush()
-		if pushes >= 2 {
+		if pushes >= 1 {
 			var ok bool
 			echoed, ok = msg.(*tg.Updates)
-			if !ok || sessionID != currentSessionID {
-				t.Fatalf("delayed echo session=%d msg=%T pushes=%d, want current session %d *tg.Updates", sessionID, msg, pushes, currentSessionID)
+			if !ok || sessionID != currentSessionID || pushes != 1 {
+				t.Fatalf("delayed echo session=%d msg=%T pushes=%d, want one *tg.Updates on current session %d", sessionID, msg, pushes, currentSessionID)
 			}
 			break
 		}
@@ -434,6 +431,15 @@ func TestUploadProfilePhotoBotTargetSignalsThenDelaysFullCurrentSessionEcho(t *t
 	}
 	if echoed == nil || len(echoed.Users) == 0 {
 		t.Fatal("current session never received the delayed full updateUser echo")
+	}
+	hasBotUpdate := false
+	for _, u := range echoed.Updates {
+		if uu, ok := u.(*tg.UpdateUser); ok && uu.UserID == bot.ID {
+			hasBotUpdate = true
+		}
+	}
+	if !hasBotUpdate {
+		t.Fatalf("delayed echo updates = %+v, want UpdateUser for the bot", echoed.Updates)
 	}
 	echoedBot, ok := echoed.Users[0].(*tg.User)
 	if !ok || echoedBot.ID != bot.ID {
